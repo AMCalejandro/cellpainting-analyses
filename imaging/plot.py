@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from .copairs_pipeline import DEFAULT_CONSISTENCY_GROUPBY
 from .load import DEFAULT_CONDITION
 
 COV_LABELS = {
@@ -40,16 +41,26 @@ CALLS = [
     ),
     ("consistency", "Consistency calls", "Same target vs different targets", "Target groups"),
 ]
+# Overrides for CALLS' consistency entry (subtitle, unit) when grouping by
+# something other than the default Metadata_target.
+CONSISTENCY_GROUPBY_LABELS = {
+    "Metadata_moa": ("Same MoA vs different MoAs", "MoA groups"),
+}
 
 
 def _load_results(
-    out_dir: Path, feature_spaces: list, covariate_sets: list, condition_tag: str
+    parquet_dir: Path,
+    feature_spaces: list,
+    covariate_sets: list,
+    condition_tag: str,
+    call_tags: dict,
 ) -> dict:
     results = {}
     for space in feature_spaces:
         for cov_key in covariate_sets:
             for call_name, *_ in CALLS:
-                path = out_dir / f"{space}{condition_tag}_{cov_key}_{call_name}.parquet"
+                tag = call_tags.get(call_name, "")
+                path = parquet_dir / f"{space}{condition_tag}_{cov_key}_{call_name}{tag}.parquet"
                 results[(space, cov_key, call_name)] = pd.read_parquet(path)
     return results
 
@@ -59,17 +70,30 @@ def make_figure(
     feature_spaces: list,
     covariate_sets: list,
     condition: str = DEFAULT_CONDITION,
+    consistency_groupby: str = DEFAULT_CONSISTENCY_GROUPBY,
 ) -> Path:
     """Build a call-count/nMAP summary figure from this run's result
-    parquets in `out_dir`, saved alongside them as `reproduced_figure.png`
-    (or `reproduced_figure_<condition>.png` for a non-default condition).
-    Returns the saved path."""
+    parquets in `out_dir/parquet/`, saved to `out_dir/figures/` as
+    `reproduced_figure.png` (or `reproduced_figure_<condition>.png` for a
+    non-default condition, with an extra `_moa` suffix if consistency was
+    grouped by Metadata_moa). Returns the saved path."""
     condition_tag = "" if condition == DEFAULT_CONDITION else f"_{condition}"
-    results = _load_results(out_dir, feature_spaces, covariate_sets, condition_tag)
+    consistency_tag = "" if consistency_groupby == DEFAULT_CONSISTENCY_GROUPBY else "_moa"
+    call_tags = {"consistency": consistency_tag}
+    results = _load_results(
+        out_dir / "parquet", feature_spaces, covariate_sets, condition_tag, call_tags
+    )
 
-    fig, axes = plt.subplots(2, len(CALLS), figsize=(20, 13))
+    calls = [
+        (call_name, title, *CONSISTENCY_GROUPBY_LABELS.get(consistency_groupby, (subtitle, unit)))
+        if call_name == "consistency"
+        else (call_name, title, subtitle, unit)
+        for call_name, title, subtitle, unit in CALLS
+    ]
 
-    for col, (call_name, title, subtitle, unit) in enumerate(CALLS):
+    fig, axes = plt.subplots(2, len(calls), figsize=(20, 13))
+
+    for col, (call_name, title, subtitle, unit) in enumerate(calls):
         ax_bar, ax_violin = axes[0, col], axes[1, col]
         n_total = len(results[(feature_spaces[0], covariate_sets[0], call_name)])
 
@@ -138,7 +162,9 @@ def make_figure(
     )
     fig.tight_layout(rect=[0, 0, 1, 0.93])
 
-    out_path = out_dir / f"reproduced_figure{condition_tag}.png"
+    figures_dir = out_dir / "figures"
+    figures_dir.mkdir(parents=True, exist_ok=True)
+    out_path = figures_dir / f"reproduced_figure{condition_tag}{consistency_tag}.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return out_path
