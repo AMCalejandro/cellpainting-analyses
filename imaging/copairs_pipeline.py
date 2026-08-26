@@ -51,13 +51,29 @@ def _add_normalized_ap(
         return null_dists[ix.to_numpy()].mean(axis=0).mean()
 
     null_means = ap_scores.groupby(sameby, observed=True)["null_ix"].apply(group_null_mean)
-    null_means.name = "null_mean"
+    null_means = null_means.rename("null_mean").reset_index()
 
-    map_df = map_df.join(null_means)
+    map_df = map_df.merge(null_means, on=sameby, how="left")
     map_df["normalized_average_precision"] = (
         map_df["mean_average_precision"] - map_df["null_mean"]
     ) / (1 - map_df["null_mean"])
     return map_df
+
+
+def _cached_ap_scores(ap_cache_path: Optional[Union[str, Path]], compute_fn) -> pd.DataFrame:
+    """Compute (or load) the expensive per-profile `average_precision` output.
+
+    `average_precision`'s pairwise-similarity pass dominates runtime; caching
+    its raw output lets `_add_normalized_ap` (or other downstream tweaks) be
+    iterated on without re-running that pass.
+    """
+    if ap_cache_path is not None and Path(ap_cache_path).exists():
+        return pd.read_parquet(ap_cache_path)
+    ap_scores = compute_fn()
+    if ap_cache_path is not None:
+        Path(ap_cache_path).parent.mkdir(parents=True, exist_ok=True)
+        ap_scores.to_parquet(ap_cache_path)
+    return ap_scores
 
 
 def compute_activity(
@@ -66,16 +82,20 @@ def compute_activity(
     null_size: int = NULL_SIZE,
     seed: int = SEED,
     cache_dir: Optional[Union[str, Path]] = None,
+    ap_cache_path: Optional[Union[str, Path]] = None,
 ) -> pd.DataFrame:
-    ap_scores = average_precision(
-        meta,
-        feats,
-        pos_sameby=["Metadata_broad_sample"],
-        pos_diffby=["Metadata_batch"],
-        neg_sameby=["Metadata_Plate"],
-        neg_diffby=["Metadata_broad_sample", "Metadata_pert_type"],
-    )
-    ap_scores = ap_scores[ap_scores["Metadata_pert_type"] == "trt"]
+    def _compute():
+        ap_scores = average_precision(
+            meta,
+            feats,
+            pos_sameby=["Metadata_broad_sample"],
+            pos_diffby=["Metadata_batch"],
+            neg_sameby=["Metadata_Plate"],
+            neg_diffby=["Metadata_broad_sample", "Metadata_pert_type"],
+        )
+        return ap_scores[ap_scores["Metadata_pert_type"] == "trt"]
+
+    ap_scores = _cached_ap_scores(ap_cache_path, _compute)
     map_df = mean_average_precision(
         ap_scores,
         sameby=["Metadata_broad_sample"],
@@ -95,17 +115,21 @@ def compute_distinctiveness(
     null_size: int = NULL_SIZE,
     seed: int = SEED,
     cache_dir: Optional[Union[str, Path]] = None,
+    ap_cache_path: Optional[Union[str, Path]] = None,
 ) -> pd.DataFrame:
-    trt = (meta["Metadata_pert_type"] == "trt").to_numpy()
-    trt_meta, trt_feats = meta.loc[trt], feats[trt]
-    ap_scores = average_precision(
-        trt_meta,
-        trt_feats,
-        pos_sameby=["Metadata_broad_sample"],
-        pos_diffby=["Metadata_batch"],
-        neg_sameby=[],
-        neg_diffby=["Metadata_broad_sample"],
-    )
+    def _compute():
+        trt = (meta["Metadata_pert_type"] == "trt").to_numpy()
+        trt_meta, trt_feats = meta.loc[trt], feats[trt]
+        return average_precision(
+            trt_meta,
+            trt_feats,
+            pos_sameby=["Metadata_broad_sample"],
+            pos_diffby=["Metadata_batch"],
+            neg_sameby=[],
+            neg_diffby=["Metadata_broad_sample"],
+        )
+
+    ap_scores = _cached_ap_scores(ap_cache_path, _compute)
     map_df = mean_average_precision(
         ap_scores,
         sameby=["Metadata_broad_sample"],
@@ -125,18 +149,22 @@ def compute_consistency(
     null_size: int = NULL_SIZE,
     seed: int = SEED,
     cache_dir: Optional[Union[str, Path]] = None,
+    ap_cache_path: Optional[Union[str, Path]] = None,
 ) -> pd.DataFrame:
-    has_target = meta["Metadata_target"].replace("", np.nan).notna()
-    mask = ((meta["Metadata_pert_type"] == "trt") & has_target).to_numpy()
-    c_meta, c_feats = meta.loc[mask], feats[mask]
-    ap_scores = average_precision(
-        c_meta,
-        c_feats,
-        pos_sameby=["Metadata_target"],
-        pos_diffby=["Metadata_broad_sample"],
-        neg_sameby=[],
-        neg_diffby=["Metadata_target"],
-    )
+    def _compute():
+        has_target = meta["Metadata_target"].replace("", np.nan).notna()
+        mask = ((meta["Metadata_pert_type"] == "trt") & has_target).to_numpy()
+        c_meta, c_feats = meta.loc[mask], feats[mask]
+        return average_precision(
+            c_meta,
+            c_feats,
+            pos_sameby=["Metadata_target"],
+            pos_diffby=["Metadata_broad_sample"],
+            neg_sameby=[],
+            neg_diffby=["Metadata_target"],
+        )
+
+    ap_scores = _cached_ap_scores(ap_cache_path, _compute)
     map_df = mean_average_precision(
         ap_scores,
         sameby=["Metadata_target"],
