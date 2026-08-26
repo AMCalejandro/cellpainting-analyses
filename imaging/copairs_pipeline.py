@@ -7,7 +7,8 @@ Definitions follow the target reproduction figure's captions:
 - Distinctiveness: same positive pairs as activity, compared against other
   FFA compounds instead of DMSO. One nMAP value per compound.
 - Consistency: same target vs. different targets. One nMAP value per target
-  group (Metadata_target).
+  group (Metadata_target by default; `compute_consistency`'s `groupby` can
+  switch this to Metadata_moa).
 
 Significance ("calls") comes straight from copairs' own permutation-test
 p-values (`below_corrected_p`), per the figure footnote: activity and
@@ -29,6 +30,7 @@ NULL_SIZE = 10000
 SEED = 0
 ACTIVITY_THRESHOLD = 0.10
 DISTINCTIVENESS_THRESHOLD = 0.10
+DEFAULT_CONSISTENCY_GROUPBY = "Metadata_target"
 CONSISTENCY_THRESHOLD = 0.05
 
 
@@ -150,27 +152,33 @@ def compute_consistency(
     seed: int = SEED,
     cache_dir: Optional[Union[str, Path]] = None,
     ap_cache_path: Optional[Union[str, Path]] = None,
+    groupby: str = DEFAULT_CONSISTENCY_GROUPBY,
 ) -> pd.DataFrame:
+    """`groupby` is the grouping column for "same X vs different X" -- either
+    "Metadata_target" (default) or "Metadata_moa". MoA groups are coarser
+    (multiple targets can share a mechanism), giving more compounds per
+    group and thus more power than the target grouping."""
+
     def _compute():
-        has_target = meta["Metadata_target"].replace("", np.nan).notna()
-        mask = ((meta["Metadata_pert_type"] == "trt") & has_target).to_numpy()
+        has_group = meta[groupby].replace("", np.nan).notna()
+        mask = ((meta["Metadata_pert_type"] == "trt") & has_group).to_numpy()
         c_meta, c_feats = meta.loc[mask], feats[mask]
         return average_precision(
             c_meta,
             c_feats,
-            pos_sameby=["Metadata_target"],
+            pos_sameby=[groupby],
             pos_diffby=["Metadata_broad_sample"],
             neg_sameby=[],
-            neg_diffby=["Metadata_target"],
+            neg_diffby=[groupby],
         )
 
     ap_scores = _cached_ap_scores(ap_cache_path, _compute)
     map_df = mean_average_precision(
         ap_scores,
-        sameby=["Metadata_target"],
+        sameby=[groupby],
         null_size=null_size,
         threshold=CONSISTENCY_THRESHOLD,
         seed=seed,
         cache_dir=cache_dir,
     )
-    return _add_normalized_ap(map_df, ap_scores, ["Metadata_target"], null_size, seed, cache_dir)
+    return _add_normalized_ap(map_df, ap_scores, [groupby], null_size, seed, cache_dir)
