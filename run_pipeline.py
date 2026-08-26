@@ -1,6 +1,7 @@
 """Driver: load -> preprocess (optional) -> residualize -> copairs for a set
 of feature spaces and Ridge covariate sets, saving one parquet per
-(feature_space, covariate_set, call_type) under imaging/results/.
+(feature_space, covariate_set, call_type) under imaging/results/, then
+plotting a call-count/nMAP summary figure from those results.
 
 Usage: .venv/bin/python run_pipeline.py [--null-size N] [--condition FFA]
            [--feature-spaces CellProfiler,CPCNN,UniDino]
@@ -13,7 +14,7 @@ from pathlib import Path
 
 from imaging import copairs_pipeline as cp
 from imaging import features as feat
-from imaging import load, paths
+from imaging import load, paths, plot
 
 FEATURE_SPACES = ["CellProfiler", "CPCNN", "UniDino"]
 
@@ -89,6 +90,9 @@ def main(
                     f"in {time.time() - t0:.1f}s -> {out_path.name}",
                     flush=True,
                 )
+
+    fig_path = plot.make_figure(out_dir, feature_spaces, covariate_sets, condition)
+    print(f"Saved figure -> {fig_path}", flush=True)
 
 
 if __name__ == "__main__":
