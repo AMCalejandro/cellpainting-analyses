@@ -6,7 +6,7 @@ IMAGING_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = IMAGING_DIR.parent
 DATA_DIR = PROJECT_ROOT / "data"
 IMAGING_DATA_DIR = DATA_DIR / "imaging"
-RESULTS_DIR = IMAGING_DIR / "results"
+RESULTS_DIR = PROJECT_ROOT / "results" / "imaging" / "copairs"
 CACHE_DIR = IMAGING_DIR / ".copairs_null_cache"
 
 METADATA_TSV = IMAGING_DATA_DIR / "metadata_cpg0014.tsv"
