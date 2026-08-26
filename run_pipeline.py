@@ -1,7 +1,8 @@
 """Driver: load -> preprocess (optional) -> residualize -> copairs for a set
 of feature spaces and Ridge covariate sets, saving one parquet per
-(feature_space, covariate_set, call_type) under imaging/results/, then
-plotting a call-count/nMAP summary figure from those results.
+(feature_space, covariate_set, call_type) under <out-dir>/parquet/ (default
+results/imaging/copairs/parquet/), then plotting a call-count/nMAP summary
+figure into <out-dir>/figures/ from those results.
 
 Usage: .venv/bin/python run_pipeline.py [--null-size N] [--condition FFA]
            [--feature-spaces CellProfiler,CPCNN,UniDino]
@@ -9,6 +10,7 @@ Usage: .venv/bin/python run_pipeline.py [--null-size N] [--condition FFA]
 """
 
 import argparse
+import functools
 import time
 from pathlib import Path
 
@@ -18,12 +20,6 @@ from imaging import load, paths, plot
 
 FEATURE_SPACES = ["CellProfiler", "CPCNN", "UniDino"]
 
-CALL_FNS = {
-    "activity": cp.compute_activity,
-    "distinctiveness": cp.compute_distinctiveness,
-    "consistency": cp.compute_consistency,
-}
-
 
 def main(
     null_size: int,
@@ -32,22 +28,38 @@ def main(
     preprocess: bool,
     out_dir: Path,
     condition: str,
+    consistency_groupby: str = cp.DEFAULT_CONSISTENCY_GROUPBY,
 ) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
+    parquet_dir = out_dir / "parquet"
     ap_cache_dir = out_dir / "ap_cache"
+    parquet_dir.mkdir(parents=True, exist_ok=True)
+    ap_cache_dir.mkdir(parents=True, exist_ok=True)
 
     # Start each run with a clean loading log for this condition, rather
     # than appending onto a possibly stale one from a previous run.
-    load.loading_log_path(condition).unlink(missing_ok=True)
+    load.loading_log_path(condition, log_dir=out_dir).unlink(missing_ok=True)
 
     # Result/ap_cache filenames only carry the condition for non-default
     # conditions, so existing FFA-condition results and their filenames
-    # (also assumed by make_figure.py) are left untouched.
+    # (also assumed by plot.py) are left untouched.
     condition_tag = "" if condition == load.DEFAULT_CONDITION else f"_{condition}"
+    # Same idea for consistency: only tag the filename when grouping by
+    # something other than the default Metadata_target, so a plain rerun
+    # can't collide with (or be shadowed by) an MoA-grouped one.
+    consistency_tag = "" if consistency_groupby == cp.DEFAULT_CONSISTENCY_GROUPBY else "_moa"
+
+    call_fns = {
+        "activity": cp.compute_activity,
+        "distinctiveness": cp.compute_distinctiveness,
+        "consistency": functools.partial(
+            cp.compute_consistency, groupby=consistency_groupby
+        ),
+    }
+    call_tags = {"consistency": consistency_tag}
 
     for space in feature_spaces:
         t0 = time.time()
-        meta, feats = load.load_feature_space(space, condition)
+        meta, feats = load.load_feature_space(space, condition, log_dir=out_dir)
         print(f"[{space}] loaded {feats.shape} in {time.time() - t0:.1f}s", flush=True)
 
         if preprocess:
@@ -69,9 +81,12 @@ def main(
                 flush=True,
             )
 
-            for call_name, fn in CALL_FNS.items():
-                file_stub = f"{space}{condition_tag}_{cov_key}_{call_name}"
-                out_path = out_dir / f"{file_stub}.parquet"
+            for call_name, fn in call_fns.items():
+                file_stub = (
+                    f"{space}{condition_tag}_{cov_key}_{call_name}"
+                    f"{call_tags.get(call_name, '')}"
+                )
+                out_path = parquet_dir / f"{file_stub}.parquet"
                 if out_path.exists():
                     print(f"[{space}/{cov_key}/{call_name}] cached, skipping", flush=True)
                     continue
@@ -91,7 +106,9 @@ def main(
                     flush=True,
                 )
 
-    fig_path = plot.make_figure(out_dir, feature_spaces, covariate_sets, condition)
+    fig_path = plot.make_figure(
+        out_dir, feature_spaces, covariate_sets, condition, consistency_groupby
+    )
     print(f"Saved figure -> {fig_path}", flush=True)
 
 
@@ -115,13 +132,20 @@ if __name__ == "__main__":
         "--out-dir",
         type=str,
         default=str(paths.RESULTS_DIR),
-        help="Directory to write result parquets (and its ap_cache/ subdir) to.",
+        help="Directory to write results into: parquet/, ap_cache/, and figures/ subdirs.",
     )
     parser.add_argument(
         "--condition",
         type=str,
         default=load.DEFAULT_CONDITION,
         help='cpg0014 Metadata_condition to load, e.g. "FFA", "IL6", "Low Gluc".',
+    )
+    parser.add_argument(
+        "--consistency-groupby",
+        type=str,
+        default=cp.DEFAULT_CONSISTENCY_GROUPBY,
+        choices=["Metadata_target", "Metadata_moa"],
+        help="Grouping column for the consistency call's same-X-vs-different-X pairs.",
     )
     args = parser.parse_args()
     main(
@@ -131,4 +155,5 @@ if __name__ == "__main__":
         args.preprocess,
         Path(args.out_dir),
         args.condition,
+        args.consistency_groupby,
     )
