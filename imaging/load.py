@@ -43,12 +43,14 @@ _METADATA_COLS = [
 ]
 
 
-def loading_log_path(condition: str) -> Path:
-    return paths.RESULTS_DIR / f"loading_log_{condition}.log"
+def loading_log_path(condition: str, log_dir: Path = None) -> Path:
+    return (log_dir or paths.RESULTS_DIR) / f"loading_log_{condition}.log"
 
 
-def _write_loading_log(feature_space: str, condition: str, lines: list) -> None:
-    with open(loading_log_path(condition), "a") as fh:
+def _write_loading_log(
+    feature_space: str, condition: str, lines: list, log_dir: Path = None
+) -> None:
+    with open(loading_log_path(condition, log_dir), "a") as fh:
         fh.write(f"=== {feature_space} (condition={condition}) ===\n")
         for line in lines:
             fh.write(f"{line}\n")
@@ -163,28 +165,32 @@ def _load_feats_with_metadata(
 
 
 def load_cellprofiler(
-    condition: str = DEFAULT_CONDITION,
+    condition: str = DEFAULT_CONDITION, log_dir: Path = None
 ) -> tuple[pd.DataFrame, np.ndarray]:
     df = pd.read_parquet(paths.CELLPROFILER_PARQUET)
     feature_cols = [c for c in df.columns if not c.startswith("Metadata")]
     lines = [f"loaded raw parquet: {df.shape}"]
     meta, feats = _load_feats_with_metadata(df, feature_cols, condition, lines)
     lines.append(f"final: {feats.shape}")
-    _write_loading_log("CellProfiler", condition, lines)
+    _write_loading_log("CellProfiler", condition, lines, log_dir)
     return meta, feats
 
 
-def load_cpcnn(condition: str = DEFAULT_CONDITION) -> tuple[pd.DataFrame, np.ndarray]:
+def load_cpcnn(
+    condition: str = DEFAULT_CONDITION, log_dir: Path = None
+) -> tuple[pd.DataFrame, np.ndarray]:
     df = pd.read_csv(paths.CPCNN_TSV_GZ, sep="\t")
     feature_cols = [c for c in df.columns if c.startswith("feature_")]
     lines = [f"loaded raw tsv: {df.shape}"]
     meta, feats = _load_feats_with_metadata(df, feature_cols, condition, lines)
     lines.append(f"final: {feats.shape}")
-    _write_loading_log("CPCNN", condition, lines)
+    _write_loading_log("CPCNN", condition, lines, log_dir)
     return meta, feats
 
 
-def load_unidino(condition: str = DEFAULT_CONDITION) -> tuple[pd.DataFrame, np.ndarray]:
+def load_unidino(
+    condition: str = DEFAULT_CONDITION, log_dir: Path = None
+) -> tuple[pd.DataFrame, np.ndarray]:
     with open(paths.UNIDINO_PKL, "rb") as fh:
         obj = pickle.load(fh)
     meta_raw, feats_raw = obj["meta"], obj["features"]
@@ -205,7 +211,7 @@ def load_unidino(condition: str = DEFAULT_CONDITION) -> tuple[pd.DataFrame, np.n
     feats = feats_raw[is_condition]
     meta, feats = _finalize(meta, feats, lines)
     lines.append(f"final: {feats.shape}")
-    _write_loading_log("UniDino", condition, lines)
+    _write_loading_log("UniDino", condition, lines, log_dir)
     return meta, feats
 
 
@@ -217,6 +223,6 @@ FEATURE_LOADERS = {
 
 
 def load_feature_space(
-    name: str, condition: str = DEFAULT_CONDITION
+    name: str, condition: str = DEFAULT_CONDITION, log_dir: Path = None
 ) -> tuple[pd.DataFrame, np.ndarray]:
-    return FEATURE_LOADERS[name](condition)
+    return FEATURE_LOADERS[name](condition, log_dir=log_dir)
