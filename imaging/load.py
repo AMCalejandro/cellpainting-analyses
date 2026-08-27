@@ -1,7 +1,11 @@
 """Load the three raw feature spaces (CellProfiler, CPCNN, UniDino) for a
-given condition (e.g. "FFA", "IL6", "Low Gluc"), join them against the
-cpg0014 plate metadata, attach a shared cell-count covariate, and drop known
-outlier wells.
+given condition (e.g. "FFA", "IL6", "Low Gluc") and cell line, join them
+against the cpg0014 plate metadata, attach a shared cell-count covariate,
+and drop known outlier wells.
+
+Every loader defaults to `Metadata_cell_line == "hWAT"` -- the other cpg0014
+cell line, U2OS, only has a Baseline arm (no stress conditions) and is out
+of scope for this analysis.
 
 Each `load_*` function returns a `(meta, feats)` pair with a standardized
 metadata schema:
@@ -29,6 +33,7 @@ import pandas as pd
 from . import paths
 
 DEFAULT_CONDITION = "FFA"
+DEFAULT_CELL_LINE = "hWAT"
 
 _METADATA_COLS = [
     "Metadata_Plate",
@@ -57,7 +62,9 @@ def _write_loading_log(
         fh.write("\n")
 
 
-def load_metadata(condition: str = DEFAULT_CONDITION) -> pd.DataFrame:
+def load_metadata(
+    condition: str = DEFAULT_CONDITION, cell_line: str = DEFAULT_CELL_LINE
+) -> pd.DataFrame:
     meta = pd.read_csv(paths.METADATA_TSV, sep="\t", dtype=str)
     meta["Metadata_qc_incompatible"] = pd.to_numeric(
         meta["Metadata_qc_incompatible"], errors="coerce"
@@ -68,7 +75,10 @@ def load_metadata(condition: str = DEFAULT_CONDITION) -> pd.DataFrame:
             "Metadata_well_position": "Metadata_Well",
         }
     )
-    return meta[meta["Metadata_condition"] == condition][_METADATA_COLS].copy()
+    keep = (meta["Metadata_condition"] == condition) & (
+        meta["Metadata_cell_line"] == cell_line
+    )
+    return meta[keep][_METADATA_COLS].copy()
 
 
 def load_batch_outliers() -> set:
@@ -147,7 +157,11 @@ def _finalize(
 
 
 def _load_feats_with_metadata(
-    df: pd.DataFrame, feature_cols: list, condition: str, lines: list
+    df: pd.DataFrame,
+    feature_cols: list,
+    condition: str,
+    lines: list,
+    cell_line: str = DEFAULT_CELL_LINE,
 ) -> tuple[pd.DataFrame, np.ndarray]:
     """Merge a raw (Plate, Well, *features*) table against the authoritative
     cpg0014 metadata, keeping only the feature columns from `df` so that any
@@ -155,8 +169,8 @@ def _load_feats_with_metadata(
     never collide with the curated metadata."""
     lines.append(f"raw rows (all conditions): {len(df)}")
     df = df[["Metadata_Plate", "Metadata_Well"] + feature_cols]
-    metadata = load_metadata(condition)
-    lines.append(f"condition-filtered metadata rows: {len(metadata)}")
+    metadata = load_metadata(condition, cell_line)
+    lines.append(f"condition+cell_line-filtered metadata rows: {len(metadata)}")
     merged = metadata.merge(df, on=["Metadata_Plate", "Metadata_Well"], how="inner")
     lines.append(f"after inner merge on (Plate, Well): {len(merged)}")
     meta = merged[_METADATA_COLS].reset_index(drop=True)
@@ -165,31 +179,37 @@ def _load_feats_with_metadata(
 
 
 def load_cellprofiler(
-    condition: str = DEFAULT_CONDITION, log_dir: Path = None
+    condition: str = DEFAULT_CONDITION,
+    log_dir: Path = None,
+    cell_line: str = DEFAULT_CELL_LINE,
 ) -> tuple[pd.DataFrame, np.ndarray]:
     df = pd.read_parquet(paths.CELLPROFILER_PARQUET)
     feature_cols = [c for c in df.columns if not c.startswith("Metadata")]
     lines = [f"loaded raw parquet: {df.shape}"]
-    meta, feats = _load_feats_with_metadata(df, feature_cols, condition, lines)
+    meta, feats = _load_feats_with_metadata(df, feature_cols, condition, lines, cell_line)
     lines.append(f"final: {feats.shape}")
     _write_loading_log("CellProfiler", condition, lines, log_dir)
     return meta, feats
 
 
 def load_cpcnn(
-    condition: str = DEFAULT_CONDITION, log_dir: Path = None
+    condition: str = DEFAULT_CONDITION,
+    log_dir: Path = None,
+    cell_line: str = DEFAULT_CELL_LINE,
 ) -> tuple[pd.DataFrame, np.ndarray]:
     df = pd.read_csv(paths.CPCNN_TSV_GZ, sep="\t")
     feature_cols = [c for c in df.columns if c.startswith("feature_")]
     lines = [f"loaded raw tsv: {df.shape}"]
-    meta, feats = _load_feats_with_metadata(df, feature_cols, condition, lines)
+    meta, feats = _load_feats_with_metadata(df, feature_cols, condition, lines, cell_line)
     lines.append(f"final: {feats.shape}")
     _write_loading_log("CPCNN", condition, lines, log_dir)
     return meta, feats
 
 
 def load_unidino(
-    condition: str = DEFAULT_CONDITION, log_dir: Path = None
+    condition: str = DEFAULT_CONDITION,
+    log_dir: Path = None,
+    cell_line: str = DEFAULT_CELL_LINE,
 ) -> tuple[pd.DataFrame, np.ndarray]:
     with open(paths.UNIDINO_PKL, "rb") as fh:
         obj = pickle.load(fh)
@@ -205,10 +225,13 @@ def load_unidino(
         meta_raw["Metadata_qc_incompatible"], errors="coerce"
     )
     lines = [f"loaded raw pickle: {feats_raw.shape}"]
-    is_condition = (meta_raw["Metadata_condition"] == condition).to_numpy()
-    lines.append(f"condition-filtered rows: {int(is_condition.sum())}")
-    meta = meta_raw.loc[is_condition, _METADATA_COLS].reset_index(drop=True)
-    feats = feats_raw[is_condition]
+    keep = (meta_raw["Metadata_condition"] == condition) & (
+        meta_raw["Metadata_cell_line"] == cell_line
+    )
+    keep = keep.to_numpy()
+    lines.append(f"condition+cell_line-filtered rows: {int(keep.sum())}")
+    meta = meta_raw.loc[keep, _METADATA_COLS].reset_index(drop=True)
+    feats = feats_raw[keep]
     meta, feats = _finalize(meta, feats, lines)
     lines.append(f"final: {feats.shape}")
     _write_loading_log("UniDino", condition, lines, log_dir)
@@ -223,6 +246,9 @@ FEATURE_LOADERS = {
 
 
 def load_feature_space(
-    name: str, condition: str = DEFAULT_CONDITION, log_dir: Path = None
+    name: str,
+    condition: str = DEFAULT_CONDITION,
+    log_dir: Path = None,
+    cell_line: str = DEFAULT_CELL_LINE,
 ) -> tuple[pd.DataFrame, np.ndarray]:
-    return FEATURE_LOADERS[name](condition, log_dir=log_dir)
+    return FEATURE_LOADERS[name](condition, log_dir=log_dir, cell_line=cell_line)

@@ -1,10 +1,22 @@
-"""Recreate the imaging_results.png layout from the copairs pipeline outputs
-saved by run_pipeline.py: a 3x2 grid of (activity, distinctiveness,
-consistency) x (call-count bars, nMAP violins), one group of covariate-set
-bars/violins per feature space.
+"""All matplotlib figure-building for the imaging pipeline, so plotting code
+lives in one place rather than being scattered across driver modules.
 
-Exposes `make_figure` for direct use (e.g. called from run_pipeline.py right
-after it writes results) rather than a `__main__`-guarded script.
+- `make_copairs_summary_figure`: recreates the imaging_results.png layout from the copairs
+  pipeline outputs saved by run_pipeline.py -- a 3x2 grid of (activity,
+  distinctiveness, consistency) x (call-count bars, nMAP violins), one group
+  of covariate-set bars/violins per feature space.
+- `make_batch_report_figures`: PCA/UMAP 2x2 grids (before/after
+  residualization x colored-by-batch/colored-by-condition) for
+  imaging.batch_report.
+- `make_covariate_comparison_figure`: one panel per feature space plotting
+  post-residualization silhouette_batch/silhouette_condition across
+  covariate sets, shading covariate sets that include "plate" -- makes it
+  visually obvious when adding plate over-corrects (condition silhouette
+  drops below zero alongside batch silhouette, instead of batch dropping
+  while condition is preserved).
+
+All are meant for direct use (e.g. called from run_pipeline.py right after
+loading/residualizing) rather than as `__main__`-guarded scripts.
 """
 
 from pathlib import Path
@@ -16,8 +28,15 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
+from sklearn.decomposition import PCA
+
 from .copairs_pipeline import DEFAULT_CONSISTENCY_GROUPBY
 from .load import DEFAULT_CONDITION
+
+try:
+    import umap
+except ImportError:
+    umap = None
 
 COV_LABELS = {
     "count": "Count",
@@ -65,7 +84,7 @@ def _load_results(
     return results
 
 
-def make_figure(
+def make_copairs_summary_figure(
     out_dir: Path,
     feature_spaces: list,
     covariate_sets: list,
@@ -165,6 +184,144 @@ def make_figure(
     figures_dir = out_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
     out_path = figures_dir / f"reproduced_figure{condition_tag}{consistency_tag}.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def _scatter_grid(
+    coords_before: np.ndarray,
+    coords_after: np.ndarray,
+    meta: pd.DataFrame,
+    batch_col: str,
+    condition_col: str,
+    title: str,
+) -> plt.Figure:
+    """2x2 grid: rows = before/after residualization, columns = colored by
+    batch / colored by condition."""
+    fig, axes = plt.subplots(2, 2, figsize=(12, 10))
+    rows = [("Before residualization", coords_before), ("After residualization", coords_after)]
+    cols = [batch_col, condition_col]
+    for r, (row_label, coords) in enumerate(rows):
+        for c, col in enumerate(cols):
+            ax = axes[r, c]
+            categories = meta[col].astype("category")
+            codes = categories.cat.codes.to_numpy()
+            n_cat = max(len(categories.cat.categories), 1)
+            cmap = plt.get_cmap("tab20" if n_cat <= 20 else "viridis")
+            ax.scatter(
+                coords[:, 0], coords[:, 1], c=codes, cmap=cmap, s=6, alpha=0.7,
+                vmin=0, vmax=max(n_cat - 1, 1),
+            )
+            ax.set_title(f"{row_label}\ncolored by {col}", fontsize=10)
+            ax.set_xlabel("Dim 1")
+            ax.set_ylabel("Dim 2")
+            if n_cat <= 12:
+                handles = [
+                    plt.Line2D(
+                        [], [], marker="o", linestyle="",
+                        color=cmap(i / max(n_cat - 1, 1)), label=str(cat),
+                    )
+                    for i, cat in enumerate(categories.cat.categories)
+                ]
+                ax.legend(handles=handles, fontsize=7, loc="best")
+    fig.suptitle(title, fontsize=13)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    return fig
+
+
+def make_batch_report_figures(
+    feats_before: np.ndarray,
+    feats_after: np.ndarray,
+    meta: pd.DataFrame,
+    out_dir: Path,
+    file_stub: str,
+    title_prefix: str,
+    batch_col: str = "Metadata_batch",
+    condition_col: str = "Metadata_condition",
+    seed: int = 0,
+) -> None:
+    """Save a PCA `<file_stub>_pca.png` (always) and UMAP `_umap.png` (if
+    umap-learn is installed) 2x2 grid -- rows before/after residualization,
+    columns colored by `batch_col`/`condition_col` -- under `out_dir`, from
+    `feats_before`/`feats_after` (already row-aligned with `meta`; the
+    caller decides how large a sample to pass in)."""
+    pca_before = PCA(n_components=2, random_state=seed).fit_transform(feats_before)
+    pca_after = PCA(n_components=2, random_state=seed).fit_transform(feats_after)
+    fig = _scatter_grid(
+        pca_before, pca_after, meta, batch_col, condition_col, title=f"{title_prefix} -- PCA"
+    )
+    fig.savefig(out_dir / f"{file_stub}_pca.png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    if umap is not None:
+        umap_before = umap.UMAP(n_components=2, random_state=seed).fit_transform(feats_before)
+        umap_after = umap.UMAP(n_components=2, random_state=seed).fit_transform(feats_after)
+        fig = _scatter_grid(
+            umap_before, umap_after, meta, batch_col, condition_col, title=f"{title_prefix} -- UMAP"
+        )
+        fig.savefig(out_dir / f"{file_stub}_umap.png", dpi=150, bbox_inches="tight")
+        plt.close(fig)
+    else:
+        print("umap-learn not installed; skipping UMAP plot", flush=True)
+
+
+def make_covariate_comparison_figure(
+    metrics_by_space: dict,
+    out_dir: Path,
+    covariate_sets: list,
+    extra_methods: list = (),
+) -> Path:
+    """One panel per feature space: post-residualization silhouette_batch
+    and silhouette_condition across `covariate_sets`, with covariate sets
+    whose name contains "plate" shaded. A covariate set over-corrects when
+    its silhouette_condition line dips below zero alongside
+    silhouette_batch -- real condition signal getting washed out along
+    with batch/plate noise -- rather than batch dropping while condition
+    stays flat or improves.
+    """
+    methods = list(covariate_sets) + list(extra_methods)
+    feature_spaces = list(metrics_by_space)
+    fig, axes = plt.subplots(
+        1, len(feature_spaces), figsize=(5 * len(feature_spaces), 5), sharey=True
+    )
+    axes = np.atleast_1d(axes)
+    x = np.arange(len(methods))
+
+    for ax, space in zip(axes, feature_spaces):
+        metrics = metrics_by_space[space]
+        batch_after = [metrics[m]["after"]["silhouette_batch"] for m in methods]
+        cond_after = [metrics[m]["after"]["silhouette_condition"] for m in methods]
+
+        for i, cov_key in enumerate(covariate_sets):
+            if "plate" in cov_key:
+                ax.axvspan(i - 0.5, i + 0.5, color="#f4b6b6", alpha=0.4, zorder=0)
+        if extra_methods:
+            ax.axvline(len(covariate_sets) - 0.5, color="black", linestyle=":", linewidth=1)
+        ax.axhline(0, color="gray", linestyle="--", linewidth=0.8, zorder=1)
+        ax.plot(x, batch_after, marker="o", color="#1f77b4", label="silhouette_batch (after)")
+        ax.plot(x, cond_after, marker="o", color="#d62728", label="silhouette_condition (after)")
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(methods, rotation=30, ha="right")
+        ax.set_xlim(-0.5, len(methods) - 0.5)
+        ax.set_title(space)
+
+    axes[0].set_ylabel("Silhouette score (after residualization)")
+    handles, labels = axes[0].get_legend_handles_labels()
+    handles.append(plt.Rectangle((0, 0), 1, 1, color="#f4b6b6", alpha=0.4))
+    labels.append("covariate set includes plate")
+    fig.legend(
+        handles, labels, loc="upper center", ncol=3, bbox_to_anchor=(0.5, 1.08), frameon=False
+    )
+    fig.suptitle(
+        "Batch correction by method -- shaded sets over-correct when\n"
+        "silhouette_condition drops below 0 along with silhouette_batch",
+        fontsize=12, y=1.18,
+    )
+    fig.tight_layout()
+
+    out_path = out_dir / "covariate_set_comparison.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return out_path

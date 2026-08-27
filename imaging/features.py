@@ -1,17 +1,35 @@
 """Feature engineering for the copairs-reproduction pipeline: optional
-cleanup/dimensionality reduction (any feature space), followed by
-Ridge-regression residualization of nuisance covariates (cell count, batch,
-plate) out of a feature matrix, mirroring the "Ridge model" variables shown
-in the target reproduction figure (Count / Count+batch / Count+plate /
-Count+batch+plate).
+cleanup/dimensionality reduction (any feature space), followed by batch/
+plate correction of a feature matrix. Two correction approaches live here:
+
+- Ridge-regression residualization of nuisance covariates (cell count,
+  batch, plate), mirroring the "Ridge model" variables shown in the target
+  reproduction figure (Count / Count+batch / Count+plate /
+  Count+batch+plate) -- `ridge_residualize`.
+- Control-centered hierarchical correction (`control_centered_residualize`
+  and the `center_*` functions it composes) -- estimates batch/plate
+  offsets from DMSO CONTROL wells only, matched WITHIN each condition, then
+  applies that offset to every well (control and treated alike) in the
+  corresponding batch/plate. This sidesteps a confound Ridge residualization
+  has on this dataset: cpg0014's plates are single-condition (every plate
+  carries rows for exactly one Metadata_condition), so a Ridge fit with
+  plate dummies as predictors removes real condition signal along with the
+  plate effect -- Metadata_Plate is a near-perfect proxy for
+  Metadata_condition. Estimating the plate offset from that plate's OWN
+  controls, relative to its own condition's pooled control mean, instead of
+  from a design matrix that also "explains" every other row's features by
+  plate membership, only removes the part of plate-to-plate variation
+  visible in unstressed DMSO wells -- not whatever part of that variation
+  happens to coincide with the condition itself. See
+  docs/batch_effect_conclusions.md for the evidence and comparison numbers.
 
 Raw (non-preprocessed) features are z-scored once per feature space, via
-`zscore`, before Ridge residualization so that the fit -- and any later
-cosine similarity computed on the residuals -- treats all columns on a
-comparable scale. `preprocess` already ends on a z-scored basis (right
-before its PCA step), so its output is intentionally *not* re-z-scored
-afterwards: doing so would flatten the PCA components back to equal
-variance and undo the variance-ranked ordering PCA produces.
+`zscore`, before either correction so that the fit -- and any later cosine
+similarity computed on the residuals -- treats all columns on a comparable
+scale. `preprocess` already ends on a z-scored basis (right before its PCA
+step), so its output is intentionally *not* re-z-scored afterwards: doing so
+would flatten the PCA components back to equal variance and undo the
+variance-ranked ordering PCA produces.
 """
 
 from typing import Iterable
@@ -27,6 +45,7 @@ COVARIATE_SETS = {
     "count_plate": ["count", "plate"],
     "count_batch_plate": ["count", "batch", "plate"],
 }
+SHRINKAGE_N0 = 100.0
 
 def zscore(feats: np.ndarray) -> np.ndarray:
     mean = feats.mean(axis=0, keepdims=True)
@@ -101,3 +120,98 @@ def ridge_residualize(
     model = Ridge(alpha=alpha, fit_intercept=True)
     model.fit(design, feats)
     return feats - model.predict(design)
+
+
+def center_batches_within_condition(
+    X: np.ndarray, batch: np.ndarray, condition: np.ndarray, is_control: np.ndarray
+) -> np.ndarray:
+    """Estimate and apply the batch offset SEPARATELY within each condition
+    (a batch x condition interaction model): for every (condition, batch)
+    group, shift that group's rows so its control-well mean matches the
+    condition's pooled control mean."""
+    X = np.asarray(X, dtype=float)
+    batch = np.asarray(batch)
+    condition = np.asarray(condition)
+    is_control = np.asarray(is_control, dtype=bool)
+
+    X_out = X.copy()
+    for cond in np.unique(condition):
+        cond_mask = condition == cond
+        mu_global_cond = X[cond_mask & is_control].mean(axis=0)
+        for b in np.unique(batch[cond_mask]):
+            mask_b = cond_mask & (batch == b)
+            mu_b = X[mask_b & is_control].mean(axis=0)
+            X_out[mask_b] = X[mask_b] - mu_b + mu_global_cond
+    return X_out
+
+
+def center_plates_within_condition_shrunk(
+    X: np.ndarray,
+    plate: np.ndarray,
+    condition: np.ndarray,
+    is_control: np.ndarray,
+    shrinkage_n0: float = SHRINKAGE_N0,
+) -> np.ndarray:
+    """Plate-level analogue of `center_batches_within_condition`, with
+    empirical-Bayes-style shrinkage of each plate's estimated control offset
+    toward its condition's pooled control mean, weighted by
+    n_plate / (n_plate + shrinkage_n0)."""
+    X = np.asarray(X, dtype=float)
+    plate = np.asarray(plate)
+    condition = np.asarray(condition)
+    is_control = np.asarray(is_control, dtype=bool)
+
+    X_out = X.copy()
+    for cond in np.unique(condition):
+        cond_mask = condition == cond
+        mu_global_cond = X[cond_mask & is_control].mean(axis=0)
+        for p in np.unique(plate[cond_mask]):
+            mask_p = cond_mask & (plate == p)
+            ctrl_p = mask_p & is_control
+            n_p = int(ctrl_p.sum())
+            if n_p == 0:
+                continue
+            mu_p = X[ctrl_p].mean(axis=0)
+            weight = n_p / (n_p + shrinkage_n0)
+            X_out[mask_p] = X[mask_p] + weight * (mu_global_cond - mu_p)
+    return X_out
+
+
+def center_plates_within_batch_shrunk(
+    X: np.ndarray,
+    plate: np.ndarray,
+    batch: np.ndarray,
+    condition: np.ndarray,
+    is_control: np.ndarray,
+    shrinkage_n0: float = SHRINKAGE_N0,
+) -> np.ndarray:
+    """Hierarchical (batch, THEN plate) correction: remove the batch x
+    condition offset first via the exact, unshrunk
+    `center_batches_within_condition`, then estimate and shrink-correct each
+    plate's RESIDUAL deviation on the now-batch-corrected data -- the
+    production correction."""
+    X_batch_corrected = center_batches_within_condition(X, batch, condition, is_control)
+    return center_plates_within_condition_shrunk(
+        X_batch_corrected, plate, condition, is_control, shrinkage_n0
+    )
+
+
+def control_centered_residualize(
+    feats: np.ndarray, meta: pd.DataFrame, shrinkage_n0: float = SHRINKAGE_N0
+) -> np.ndarray:
+    """Ridge-residualize cell count only (a continuous nuisance covariate,
+    better handled by regression than by group-centering), then
+    hierarchically control-center batch (exact) and plate (shrunk) within
+    each condition via `center_plates_within_batch_shrunk`. `feats` must
+    already be z-scored; `meta` must carry Metadata_batch, Metadata_Plate,
+    Metadata_condition and Metadata_pert_type (DMSO controls == "negcon")."""
+    feats = ridge_residualize(feats, meta, ["count"])
+    is_control = (meta["Metadata_pert_type"] == "negcon").to_numpy()
+    return center_plates_within_batch_shrunk(
+        feats,
+        meta["Metadata_Plate"].to_numpy(),
+        meta["Metadata_batch"].to_numpy(),
+        meta["Metadata_condition"].to_numpy(),
+        is_control,
+        shrinkage_n0,
+    )
