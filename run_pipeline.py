@@ -111,6 +111,10 @@ def main(
     for space in feature_spaces:
         t0 = time.time()
         meta, feats = load.load_feature_space(space, condition, log_dir=out_dir)
+        # Needed by the "control_centered" residualize method, which groups
+        # its control-centering by condition; every row here already shares
+        # the same --condition, so this is just a constant column.
+        meta["Metadata_condition"] = condition
         print(f"[{space}] loaded {feats.shape} in {time.time() - t0:.1f}s", flush=True)
 
         if preprocess:
@@ -124,9 +128,8 @@ def main(
             feats = feat.zscore(feats)
 
         for cov_key in covariate_sets:
-            covariates = feat.COVARIATE_SETS[cov_key]
             t0 = time.time()
-            residual_feats = feat.ridge_residualize(feats, meta, covariates)
+            residual_feats = br.RESIDUALIZE_METHODS[cov_key](feats, meta)
             print(
                 f"[{space}/{cov_key}] residualized in {time.time() - t0:.1f}s",
                 flush=True,
@@ -168,7 +171,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--null-size", type=int, default=cp.NULL_SIZE)
     parser.add_argument("--feature-spaces", type=str, default=",".join(FEATURE_SPACES))
     parser.add_argument(
-        "--covariate-sets", type=str, default=",".join(feat.COVARIATE_SETS)
+        "--covariate-sets", type=str, default=",".join(br.RESIDUALIZE_METHODS)
     )
     parser.add_argument(
         "--preprocess",

@@ -43,12 +43,14 @@ COV_LABELS = {
     "count_batch": "Count + batch",
     "count_plate": "Count + plate",
     "count_batch_plate": "Count + batch + plate",
+    "control_centered": "Control-centered (batch x condition)",
 }
 COV_COLORS = {
     "count": "#c9ccd1",
     "count_batch": "#5a5f66",
     "count_plate": "#7ec8f2",
     "count_batch_plate": "#1f77b4",
+    "control_centered": "#ff7f0e",
 }
 CALLS = [
     ("activity", "Activity calls", "Same compound vs plate-matched DMSO controls", "Compounds"),

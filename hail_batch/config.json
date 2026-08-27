@@ -25,7 +25,7 @@
       "Low Gluc": "Low_Gluc"
     },
     "feature-spaces": ["CellProfiler", "CPCNN", "UniDino"],
-    "covariate-sets": ["count", "count_batch", "count_plate", "count_batch_plate"],
+    "covariate-sets": ["count", "count_batch", "count_plate", "count_batch_plate", "control_centered"],
     "null-size": 10000,
     "preprocess": false
   }
