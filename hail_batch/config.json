@@ -3,7 +3,7 @@
     "billing-project": "-",
     "remote-tmpdir": "gs://nnfc-karczewski-tmp-7day",
     "regions": ["us-central1"],
-    "machine-type": "n1-standard-16",
+    "machine-type": "n1-highmem-16",
     "storage": "20Gi"
   },
   "repo": {
