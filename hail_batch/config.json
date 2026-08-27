@@ -1,0 +1,32 @@
+{
+  "hail-batch": {
+    "billing-project": "-",
+    "remote-tmpdir": "gs://nnfc-karczewski-tmp-7day",
+    "regions": ["us-central1"],
+    "machine-type": "n1-standard-16",
+    "storage": "20Gi"
+  },
+  "repo": {
+    "url": "https://github.com/AMCalejandro/cellpainting-analyses.git",
+    "branch": "main"
+  },
+  "data-files": {
+    "metadata_cpg0014.tsv": "gs://nnf-amc/data/cp-imaging-adi/averages/metadata_cpg0014.tsv",
+    "batch_outliers.tsv": "gs://nnf-amc/data/cp-imaging-adi/averages/batch_outliers.tsv",
+    "augmented_combined.parquet": "gs://nnf-amc/data/cp-imaging-adi/averages/augmented_combined.parquet",
+    "cpcnn_avg_cellCounWeigh.tsv.gz": "gs://nnf-amc/data/cp-imaging-adi/averages/cpcnn_avg_cellCounWeigh.tsv.gz",
+    "unidino_data_w_batch5_well_avg.pkl": "gs://nnf-amc/data/cp-imaging-adi/averages/unidino_data_w_batch5_well_avg.pkl"
+  },
+  "output-dir": "gs://nnf-amc/project/cp-imaging-adi/results/copairs/",
+  "pipeline": {
+    "conditions": {
+      "FFA": "FFA",
+      "IL6": "IL6",
+      "Low Gluc": "Low_Gluc"
+    },
+    "feature-spaces": ["CellProfiler", "CPCNN", "UniDino"],
+    "covariate-sets": ["count", "count_batch", "count_plate", "count_batch_plate"],
+    "null-size": 10000,
+    "preprocess": false
+  }
+}
