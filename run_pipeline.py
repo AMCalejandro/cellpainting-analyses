@@ -4,16 +4,27 @@ of feature spaces and Ridge covariate sets, saving one parquet per
 results/imaging/copairs/parquet/), then plotting a call-count/nMAP summary
 figure into <out-dir>/figures/ from those results.
 
+With --batch-report, skips the copairs run entirely and instead runs
+imaging.batch_report: jointly load + residualize all hWAT conditions per
+feature space/covariate set, and report batch/condition silhouette scores
+plus PCA/UMAP figures into --batch-report-out-dir (default
+results/imaging/batch_correction_report/).
+
 Usage: .venv/bin/python run_pipeline.py [--null-size N] [--condition FFA]
+           [--feature-spaces CellProfiler,CPCNN,UniDino]
+           [--covariate-sets count,count_batch,count_plate,count_batch_plate]
+       .venv/bin/python run_pipeline.py --batch-report
            [--feature-spaces CellProfiler,CPCNN,UniDino]
            [--covariate-sets count,count_batch,count_plate,count_batch_plate]
 """
 
 import argparse
 import functools
+import json
 import time
 from pathlib import Path
 
+from imaging import batch_report as br
 from imaging import copairs_pipeline as cp
 from imaging import features as feat
 from imaging import load, paths, plot
@@ -29,7 +40,47 @@ def main(
     out_dir: Path,
     condition: str,
     consistency_groupby: str = cp.DEFAULT_CONSISTENCY_GROUPBY,
+    batch_report: bool = False,
+    batch_report_out_dir: Path = paths.BATCH_REPORT_DIR,
 ) -> None:
+    if batch_report:
+        batch_report_out_dir.mkdir(parents=True, exist_ok=True)
+        extra_methods = ["control_centered"]
+        metrics_by_space = {}
+        for space in feature_spaces:
+            metrics_by_space[space] = {}
+            for method in covariate_sets + extra_methods:
+                t0 = time.time()
+                result = br.compute_report(space, method)
+                metrics = result["metrics"]
+                metrics_by_space[space][method] = metrics
+
+                file_stub = f"{space}_{method}"
+                plot.make_batch_report_figures(
+                    result["before_sample"], result["after_sample"], result["meta_sample"],
+                    batch_report_out_dir, file_stub,
+                    title_prefix=f"{space} / {method}",
+                    batch_col=br.BATCH_COL, condition_col=br.CONDITION_COL, seed=br.SEED,
+                )
+                (batch_report_out_dir / f"{file_stub}_metrics.json").write_text(
+                    json.dumps(metrics, indent=2)
+                )
+
+                print(
+                    f"[{space}/{method}] silhouette_batch "
+                    f"{metrics['before']['silhouette_batch']:.3f} -> "
+                    f"{metrics['after']['silhouette_batch']:.3f}, "
+                    f"silhouette_condition {metrics['before']['silhouette_condition']:.3f} -> "
+                    f"{metrics['after']['silhouette_condition']:.3f} "
+                    f"in {time.time() - t0:.1f}s",
+                    flush=True,
+                )
+        comparison_path = plot.make_covariate_comparison_figure(
+            metrics_by_space, batch_report_out_dir, covariate_sets, extra_methods
+        )
+        print(f"Saved covariate-set comparison figure -> {comparison_path}", flush=True)
+        return
+
     parquet_dir = out_dir / "parquet"
     ap_cache_dir = out_dir / "ap_cache"
     parquet_dir.mkdir(parents=True, exist_ok=True)
@@ -106,13 +157,13 @@ def main(
                     flush=True,
                 )
 
-    fig_path = plot.make_figure(
+    fig_path = plot.make_copairs_summary_figure(
         out_dir, feature_spaces, covariate_sets, condition, consistency_groupby
     )
     print(f"Saved figure -> {fig_path}", flush=True)
 
 
-if __name__ == "__main__":
+def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--null-size", type=int, default=cp.NULL_SIZE)
     parser.add_argument("--feature-spaces", type=str, default=",".join(FEATURE_SPACES))
@@ -147,7 +198,28 @@ if __name__ == "__main__":
         choices=["Metadata_target", "Metadata_moa"],
         help="Grouping column for the consistency call's same-X-vs-different-X pairs.",
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--batch-report",
+        action="store_true",
+        help=(
+            "Instead of the copairs activity/distinctiveness/consistency "
+            "run, jointly load all hWAT conditions per feature space, "
+            "z-score, Ridge-residualize with each --covariate-sets entry, "
+            "and report batch/condition silhouette scores + PCA/UMAP "
+            "figures (imaging.batch_report) into --batch-report-out-dir."
+        ),
+    )
+    parser.add_argument(
+        "--batch-report-out-dir",
+        type=str,
+        default=str(paths.BATCH_REPORT_DIR),
+        help="Directory to write --batch-report metrics/figures into.",
+    )
+    return parser.parse_args()
+
+
+if __name__ == "__main__":
+    args = parse_args()
     main(
         args.null_size,
         args.feature_spaces.split(","),
@@ -156,4 +228,6 @@ if __name__ == "__main__":
         Path(args.out_dir),
         args.condition,
         args.consistency_groupby,
+        args.batch_report,
+        Path(args.batch_report_out_dir),
     )
