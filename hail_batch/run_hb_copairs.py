@@ -59,7 +59,8 @@ def build_batch(config: dict) -> hb.Batch:
 
         j.command("tar -czf results.tar.gz -C results .")
         j.command(f"mv results.tar.gz {j.ofile}")
-        b.write_output(j.ofile, f"{config['output-dir']}/{condition_tag}/results.tar.gz")
+        output_dir = config["output-dir"].rstrip("/")
+        b.write_output(j.ofile, f"{output_dir}/{condition_tag}/results.tar.gz")
 
     return b
 
