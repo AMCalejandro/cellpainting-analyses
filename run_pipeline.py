@@ -45,11 +45,16 @@ def main(
 ) -> None:
     if batch_report:
         batch_report_out_dir.mkdir(parents=True, exist_ok=True)
-        extra_methods = ["control_centered"]
+        # Split the requested methods so the comparison figure can shade the
+        # pooled Ridge covariate sets (the ones whose plate dummies span the
+        # condition direction) and draw everything else -- nested_*,
+        # control_centered -- to the right of the divider.
+        ridge_sets = [m for m in covariate_sets if m in feat.COVARIATE_SETS]
+        extra_methods = [m for m in covariate_sets if m not in feat.COVARIATE_SETS]
         metrics_by_space = {}
         for space in feature_spaces:
             metrics_by_space[space] = {}
-            for method in covariate_sets + extra_methods:
+            for method in ridge_sets + extra_methods:
                 t0 = time.time()
                 result = br.compute_report(space, method)
                 metrics = result["metrics"]
@@ -76,7 +81,7 @@ def main(
                     flush=True,
                 )
         comparison_path = plot.make_covariate_comparison_figure(
-            metrics_by_space, batch_report_out_dir, covariate_sets, extra_methods
+            metrics_by_space, batch_report_out_dir, ridge_sets, extra_methods
         )
         print(f"Saved covariate-set comparison figure -> {comparison_path}", flush=True)
         return
@@ -171,7 +176,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--null-size", type=int, default=cp.NULL_SIZE)
     parser.add_argument("--feature-spaces", type=str, default=",".join(FEATURE_SPACES))
     parser.add_argument(
-        "--covariate-sets", type=str, default=",".join(br.RESIDUALIZE_METHODS)
+        "--covariate-sets",
+        type=str,
+        default=None,
+        help=(
+            "Comma-separated imaging.features.RESIDUALIZE_METHODS keys. "
+            "Defaults to features.WITHIN_CONDITION_METHODS for the copairs "
+            "run (one condition at a time, so the nested_* variants would be "
+            "exact duplicates of their pooled counterparts) and to "
+            "features.CROSS_CONDITION_METHODS for --batch-report."
+        ),
     )
     parser.add_argument(
         "--preprocess",
@@ -223,10 +237,16 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
+    if args.covariate_sets is not None:
+        covariate_sets = args.covariate_sets.split(",")
+    elif args.batch_report:
+        covariate_sets = list(feat.CROSS_CONDITION_METHODS)
+    else:
+        covariate_sets = list(feat.WITHIN_CONDITION_METHODS)
     main(
         args.null_size,
         args.feature_spaces.split(","),
-        args.covariate_sets.split(","),
+        covariate_sets,
         args.preprocess,
         Path(args.out_dir),
         args.condition,

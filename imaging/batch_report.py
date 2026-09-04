@@ -35,17 +35,13 @@ BATCH_COL = "Metadata_batch"
 CONDITION_COL = "Metadata_condition"
 
 
-def _ridge_method(covariates: list):
-    return lambda feats, meta: feat.ridge_residualize(feats, meta, covariates)
-
-
-# Every Ridge covariate set from feat.COVARIATE_SETS, plus the control-
-# centered hierarchical correction -- all callable the same way:
+# Re-exported from `imaging.features`, which owns the registry so that
+# run_pipeline.py, this module and `imaging.reversion` all dispatch method
+# names through one place. Includes every Ridge covariate set, the
+# `nested_*` (condition-nested Ridge) variants and the control-centered
+# hierarchical correction, all callable as
 # fn(feats_zscored, meta) -> feats_residualized.
-RESIDUALIZE_METHODS = {
-    cov_key: _ridge_method(covs) for cov_key, covs in feat.COVARIATE_SETS.items()
-}
-RESIDUALIZE_METHODS["control_centered"] = feat.control_centered_residualize
+RESIDUALIZE_METHODS = feat.RESIDUALIZE_METHODS
 
 
 def load_all_conditions(

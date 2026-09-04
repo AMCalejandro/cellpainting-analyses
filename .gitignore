@@ -1,4 +1,7 @@
-/data/
+/data
 **/results/
+/tmp/
 __pycache__/
 .copairs_null_cache/
+/archive/
+/docs/

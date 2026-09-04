@@ -96,7 +96,8 @@ def _design_matrix(meta: pd.DataFrame, covariates: Iterable[str]) -> np.ndarray:
     parts = []
     if "count" in covariates:
         count = meta["Metadata_cell_count"].to_numpy(dtype=np.float64).reshape(-1, 1)
-        count = (count - count.mean()) / count.std()
+        std = count.std()
+        count = (count - count.mean()) / (std if std > 0 else 1.0)
         parts.append(count)
     if "batch" in covariates:
         parts.append(pd.get_dummies(meta["Metadata_batch"]).to_numpy(dtype=np.float64))
@@ -120,6 +121,61 @@ def ridge_residualize(
     model = Ridge(alpha=alpha, fit_intercept=True)
     model.fit(design, feats)
     return feats - model.predict(design)
+
+
+def condition_nested_residualize(
+    feats: np.ndarray,
+    meta: pd.DataFrame,
+    covariates: Iterable[str] = ("count", "plate"),
+    alpha: float = 1.0,
+) -> np.ndarray:
+    """`ridge_residualize` fit SEPARATELY within each `Metadata_condition`,
+    with that condition's own mean added back afterwards.
+
+    This is the same estimator as the pooled `ridge_residualize(...,
+    ["count", "plate"])` -- same covariates, same alpha, same ~350 wells per
+    plate behind each offset -- reparameterized so it stops destroying the
+    condition signal. The pooled fit builds ONE design matrix over every
+    condition's rows, and because cpg0014's plates are single-condition, each
+    condition indicator is the sum of that condition's plate indicators and
+    therefore lies inside the design's column space: the fit removes the
+    between-condition offset entirely, as a side effect of removing the
+    between-plate offset (see docs/batch_effect_conclusions.md). Fitting one
+    Ridge per condition instead means a condition's plate dummies can only
+    ever span deviations from that condition's own mean, so:
+
+    - within-condition, between-plate variance is removed at full strength --
+      identical to what the pooled `count_plate` fit removes, and the part
+      archive/diagnose_overcorrection.py and
+      archive/diagnose_holdout_generalization.py showed is genuine technical
+      drift rather than a fitting artifact;
+    - the between-condition offset (the reversion axis `mu_B - mu_s`) is
+      preserved EXACTLY. sklearn's Ridge centers its inputs when
+      `fit_intercept=True`, so each condition's residuals are exactly
+      mean-zero, and re-adding that condition's raw mean restores its level.
+
+    This is the correction `run_pipeline.py` already applies per condition for
+    the copairs calls -- condition is constant there, so a `count_plate` fit
+    is *already* condition-nested. The only change is to stop pooling
+    conditions before fitting when Baseline and a stress arm are loaded
+    together (`imaging.reversion.load_joint_residualized`).
+
+    Note this preserves the axis; it does NOT de-confound it. Every plate
+    carries exactly one condition, so whatever technical difference separates
+    "Baseline plates" from "stress plates" survives here along with the
+    biology. It makes the axis less noisy, not less biased.
+
+    `feats` must already be z-scored; `meta` must carry `Metadata_condition`
+    plus whatever columns `covariates` needs."""
+    feats = np.asarray(feats, dtype=float)
+    condition = meta["Metadata_condition"].to_numpy()
+    out = np.empty_like(feats)
+    for cond in np.unique(condition):
+        mask = condition == cond
+        sub_feats = feats[mask]
+        residual = ridge_residualize(sub_feats, meta.loc[mask], covariates, alpha)
+        out[mask] = residual + sub_feats.mean(axis=0)
+    return out
 
 
 def center_batches_within_condition(
@@ -215,3 +271,40 @@ def control_centered_residualize(
         is_control,
         shrinkage_n0,
     )
+
+
+def _ridge_method(covariates: list):
+    return lambda feats, meta: ridge_residualize(feats, meta, covariates)
+
+
+def _nested_method(covariates: list):
+    return lambda feats, meta: condition_nested_residualize(feats, meta, covariates)
+
+
+# Every correction in this module, callable the same way:
+# fn(feats_zscored, meta) -> feats_residualized. `imaging.batch_report`,
+# run_pipeline.py and `imaging.reversion` all dispatch through this registry,
+# so a method only has to be registered once to be available everywhere.
+#
+# The `nested_*` variants only exist for covariate sets containing "plate":
+# without plate dummies the pooled fit's column space doesn't contain the
+# condition direction, so nesting would be a no-op relative to the pooled fit.
+RESIDUALIZE_METHODS = {key: _ridge_method(covs) for key, covs in COVARIATE_SETS.items()}
+RESIDUALIZE_METHODS.update(
+    {
+        f"nested_{key}": _nested_method(COVARIATE_SETS[key])
+        for key in ("count_plate", "count_batch_plate")
+    }
+)
+RESIDUALIZE_METHODS["control_centered"] = control_centered_residualize
+
+# The copairs pipeline runs ONE condition at a time, so Metadata_condition is
+# constant there and every `nested_*` method is exactly equivalent to its
+# pooled counterpart -- sweeping both would only double an already
+# memory-bound runtime.
+WITHIN_CONDITION_METHODS = [
+    key for key in RESIDUALIZE_METHODS if not key.startswith("nested_")
+]
+# The cross-condition batch report pools conditions, which is exactly where
+# the pooled plate fits over-correct and the nested variants are the point.
+CROSS_CONDITION_METHODS = list(RESIDUALIZE_METHODS)
