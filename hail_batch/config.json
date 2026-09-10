@@ -8,7 +8,7 @@
   },
   "repo": {
     "url": "https://github.com/AMCalejandro/cellpainting-analyses.git",
-    "branch": "main"
+    "branch": "reversion-condition-nested"
   },
   "data-files": {
     "metadata_cpg0014.tsv": "gs://nnf-amc/data/cp-imaging-adi/averages/metadata_cpg0014.tsv",

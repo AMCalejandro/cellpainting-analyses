@@ -7,8 +7,11 @@ Definitions follow the target reproduction figure's captions:
 - Distinctiveness: same positive pairs as activity, compared against other
   FFA compounds instead of DMSO. One nMAP value per compound.
 - Consistency: same target vs. different targets. One nMAP value per target
-  group (Metadata_target by default; `compute_consistency`'s `groupby` can
-  switch this to Metadata_moa).
+  (Metadata_target by default; `compute_consistency`'s `groupby` can switch
+  this to Metadata_moa). Both columns are "|"-delimited multi-label
+  annotations, so "same target" is computed with copairs' multilabel matcher
+  (shared-label intersection) rather than exact-string equality -- see
+  `compute_consistency`'s docstring.
 
 Significance ("calls") comes straight from copairs' own permutation-test
 p-values (`below_corrected_p`), per the figure footnote: activity and
@@ -25,6 +28,7 @@ import numpy as np
 import pandas as pd
 from copairs import compute
 from copairs.map import average_precision, mean_average_precision
+from copairs.map import multilabel as cp_multilabel
 
 NULL_SIZE = 10000
 SEED = 0
@@ -42,23 +46,25 @@ def _add_normalized_ap(
     seed: int,
     cache_dir: Optional[Union[str, Path]],
 ) -> pd.DataFrame:
+    """Normalize per query first, then average within each group -- matching
+    `normalized AP = (AP - null AP) / (1 - null AP)` applied query-by-query
+    before the group mean, not the group mean normalized once using an
+    averaged null. Those two orders only agree when every query in a group
+    shares the same (n_pos_pairs, n_total_pairs) config; consistency groups
+    (compounds with very different numbers of same-target partners) violate
+    that badly, so normalizing the aggregate would silently bias the score."""
     ap_scores = ap_scores.query("~average_precision.isna() and n_pos_pairs > 0")
     ap_scores = ap_scores.reset_index(drop=True).copy()
     null_confs = ap_scores[["n_pos_pairs", "n_total_pairs"]].values
     null_confs, rev_ix = np.unique(null_confs, axis=0, return_inverse=True)
     null_dists = compute.get_null_dists(null_confs, null_size, seed=seed, cache_dir=cache_dir)
-    ap_scores["null_ix"] = rev_ix
+    null_ap = null_dists.mean(axis=1)[rev_ix]
+    ap_scores["normalized_ap"] = (ap_scores["average_precision"] - null_ap) / (1 - null_ap)
 
-    def group_null_mean(ix):
-        return null_dists[ix.to_numpy()].mean(axis=0).mean()
+    nmap = ap_scores.groupby(sameby, observed=True)["normalized_ap"].mean()
+    nmap = nmap.rename("normalized_average_precision").reset_index()
 
-    null_means = ap_scores.groupby(sameby, observed=True)["null_ix"].apply(group_null_mean)
-    null_means = null_means.rename("null_mean").reset_index()
-
-    map_df = map_df.merge(null_means, on=sameby, how="left")
-    map_df["normalized_average_precision"] = (
-        map_df["mean_average_precision"] - map_df["null_mean"]
-    ) / (1 - map_df["null_mean"])
+    map_df = map_df.merge(nmap, on=sameby, how="left")
     return map_df
 
 
@@ -157,19 +163,34 @@ def compute_consistency(
     """`groupby` is the grouping column for "same X vs different X" -- either
     "Metadata_target" (default) or "Metadata_moa". MoA groups are coarser
     (multiple targets can share a mechanism), giving more compounds per
-    group and thus more power than the target grouping."""
+    group and thus more power than the target grouping.
+
+    Both columns are "|"-delimited MULTI-label annotations -- a compound can
+    hit several targets (or share several mechanisms) -- so this uses
+    copairs' multilabel matcher (`copairs.map.multilabel.average_precision`,
+    with `groupby` split into a list first) instead of plain
+    `average_precision`'s exact-string-equality grouping. Under string
+    equality, a compound annotated "ADRB1" and one annotated
+    "ADRB1|ADRB2|ADRB3" are treated as different groups even though they
+    share a target -- fragmenting almost every real target-sharing
+    relationship in this panel into near-singleton groups and leaving
+    corrected p-values nowhere near the threshold. The multilabel matcher
+    instead counts two compounds as "same target" whenever their label sets
+    intersect."""
 
     def _compute():
         has_group = meta[groupby].replace("", np.nan).notna()
         mask = ((meta["Metadata_pert_type"] == "trt") & has_group).to_numpy()
-        c_meta, c_feats = meta.loc[mask], feats[mask]
-        return average_precision(
+        c_meta, c_feats = meta.loc[mask].copy(), feats[mask]
+        c_meta[groupby] = c_meta[groupby].str.split("|")
+        return cp_multilabel.average_precision(
             c_meta,
             c_feats,
             pos_sameby=[groupby],
             pos_diffby=["Metadata_broad_sample"],
             neg_sameby=[],
             neg_diffby=[groupby],
+            multilabel_col=groupby,
         )
 
     ap_scores = _cached_ap_scores(ap_cache_path, _compute)
