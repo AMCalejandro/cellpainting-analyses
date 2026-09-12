@@ -1,7 +1,7 @@
 """Batch-effect report: for one feature space, jointly load every hWAT
 condition (Baseline + the stress conditions), z-score once, then measure
 how a residualization method (a Ridge covariate set, or the control-centered
-correction, both in `imaging.features`) changes two silhouette scores
+correction, both in `utils.features`) changes two silhouette scores
 computed on the same row sample:
 
 - `silhouette_batch` (Metadata_batch) -- batch signal. Want this to DROP
@@ -11,11 +11,19 @@ computed on the same row sample:
   of Baseline/FFA/IL6/Low Gluc a well belongs to). Want this to survive
   residualization: still separable by condition means the correction didn't
   wash out real signal along with the batch effect.
+- `silhouette_plate` (Metadata_Plate) -- finer-grained batch signal. Every
+  plate carries exactly one condition (see utils.features docstring), so
+  this is inflated by condition separability itself; read it relative to
+  `silhouette_condition` rather than against zero. If it stays well above
+  `silhouette_condition` after residualization, plate structure survives
+  *within* a condition (e.g. control_centered's shrunk plate offsets); if it
+  converges toward `silhouette_condition`, within-condition plate drift was
+  absorbed (e.g. nested_count_plate).
 
 `compute_report` is pure (no disk writes, no plotting), matching
-`imaging.copairs_pipeline` and `imaging.reversion`'s convention: this
+`utils.copairs` and `imaging.reversion`'s convention: this
 module is a library, and the driver script (run_pipeline.py) decides what
-gets persisted and calls `imaging.plot` to render figures.
+gets persisted and calls `utils.plot` to render figures.
 """
 
 from pathlib import Path
@@ -25,7 +33,8 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import silhouette_score
 
-from . import features as feat
+from utils import features as feat
+
 from . import load
 
 ALL_CONDITIONS = ["Baseline", "FFA", "IL6", "Low Gluc"]
@@ -33,9 +42,10 @@ SAMPLE_SIZE = 5000
 SEED = 0
 BATCH_COL = "Metadata_batch"
 CONDITION_COL = "Metadata_condition"
+PLATE_COL = "Metadata_Plate"
 
 
-# Re-exported from `imaging.features`, which owns the registry so that
+# Re-exported from `utils.features`, which owns the registry so that
 # run_pipeline.py, this module and `imaging.reversion` all dispatch method
 # names through one place. Includes every Ridge covariate set, the
 # `nested_*` (condition-nested Ridge) variants and the control-centered
@@ -75,12 +85,16 @@ def _subsample_index(n: int, sample_size: Optional[int], seed: int) -> np.ndarra
 
 
 def compute_silhouette_scores(
-    feats: np.ndarray, batch_labels: pd.Series, condition_labels: pd.Series
+    feats: np.ndarray,
+    batch_labels: pd.Series,
+    condition_labels: pd.Series,
+    plate_labels: pd.Series,
 ) -> dict:
     return {
         "n_samples": int(len(feats)),
         "silhouette_batch": float(silhouette_score(feats, batch_labels)),
         "silhouette_condition": float(silhouette_score(feats, condition_labels)),
+        "silhouette_plate": float(silhouette_score(feats, plate_labels)),
     }
 
 
@@ -99,7 +113,7 @@ def compute_report(
     Pure: no disk writes, no plotting. Returns `{"metrics": ..., "meta_sample":
     ..., "before_sample": ..., "after_sample": ...}` -- the caller (e.g.
     run_pipeline.py's --batch-report branch) decides what to persist and
-    calls `imaging.plot.make_batch_report_figures` on the samples itself."""
+    calls `utils.plot.make_batch_report_figures` on the samples itself."""
     meta, feats_raw = load_all_conditions(feature_space, conditions, cell_line)
     feats_before = feat.zscore(feats_raw)
     feats_after = RESIDUALIZE_METHODS[method](feats_before, meta)
@@ -113,8 +127,12 @@ def compute_report(
         "method": method,
         "cell_line": cell_line,
         "conditions": conditions,
-        "before": compute_silhouette_scores(before_s, meta_s[BATCH_COL], meta_s[CONDITION_COL]),
-        "after": compute_silhouette_scores(after_s, meta_s[BATCH_COL], meta_s[CONDITION_COL]),
+        "before": compute_silhouette_scores(
+            before_s, meta_s[BATCH_COL], meta_s[CONDITION_COL], meta_s[PLATE_COL]
+        ),
+        "after": compute_silhouette_scores(
+            after_s, meta_s[BATCH_COL], meta_s[CONDITION_COL], meta_s[PLATE_COL]
+        ),
     }
     return {
         "metrics": metrics,

@@ -1,5 +1,22 @@
-"""Compound-reversion scoring: does an active compound pull a stress
-condition's profile back toward the unstressed Baseline condition?
+"""Compound-reversion scoring for proteomics -- shares its axis/gate engine
+with `imaging.reversion` via `utils.reversion`, but keeps its own
+`_cytotox_table`/`compute_reversion` because gate (3)'s viability/cytotoxicity
+check needs a per-well cell count that has no analog on a proteomics plate
+(a physically distinct plate from the one CellProfiler counted cells on --
+see `proteomics.imaging_metadata`'s docstring). Every other gate is
+unchanged from `imaging.reversion`; see that module's docstring for the
+full gate spec and rationale. Differences from the imaging version:
+
+  - `gate_viability` is dropped from gate (3): `viability`/`tau_viab_n` are
+    not computed (no `Metadata_cell_count` to compute them from), so gate
+    (3) here is `gate_beta_par & gate_promiscuity` only, not also
+    `gate_viability`.
+  - No `load_joint_residualized`: `proteomics.pipeline.load_corrected_proteomics`
+    already returns every condition jointly z-scored and per-condition
+    (nested) residualized in one call, so there is no separate two-condition
+    joint-load step to do here -- see `proteomics.concordance.condition_hits`,
+    which slices Baseline + one stress condition out of that pooled matrix
+    before calling `compute_reversion` below.
 
 Axis, from each condition's DMSO-control centroid:
 
@@ -29,9 +46,9 @@ Per-well scores (projection onto the axis, from mu_s):
           gate_beta_par    beta_par >= tau_par_n (no negative on-axis
                             drift, i.e. doesn't push healthy cells toward
                             the stress phenotype)
-          gate_viability   mean cell count vs. Baseline-DMSO >= tau_viab_n
           gate_promiscuity beta_perp (off-axis Baseline activity) below a
                             pool-relative median + 3*MAD outlier rule
+      (no gate_viability here -- see module docstring)
 
   (4) stress-specific -- a difference-in-differences test against the
       structural confound that every plate carries exactly one condition
@@ -42,31 +59,20 @@ Per-well scores (projection onto the axis, from mu_s):
       tested against a matched DMSO null. -> `gate_specificity`.
 
 `nominated_robust = gate_consistency_mean & gate_loo_robust & gate_beta_par &
-gate_viability & gate_promiscuity & gate_specificity`;
+gate_promiscuity & gate_specificity`;
 `nominated_robust_ci = nominated_robust & gate_ci_positive` is the call to
 act on. `RI_spec = rho_int / tau_int` is the sort key: stress-specific
 reversion in units of its own replicate-matched noise floor.
 
-See `docs/reversion_pipeline_final.md` for the full spec and
-`docs/reversion_pipeline.md` for the measurements behind each choice above.
+See `imaging/reversion.py`, `utils/reversion.py` and
+`docs/reversion_pipeline_final.md` for the full spec this forks from.
+"""
 
-`load_joint_residualized` loads Baseline + the stress condition together and
-z-scores/residualizes them as ONE matrix, so mu_B and mu_s share a
-coordinate space -- fitting normalization separately per condition would
-make the axis an artifact of that choice.
-
-The axis/gate engine shared with `proteomics.reversion` (the axis itself,
-gates 2/2b/4, and the promiscuity rule) lives in `utils.reversion`; only
-gate (3)'s cell-count viability check (`_cytotox_table`'s
-`gate_viability`/`n_toxic`) and `load_joint_residualized` (which needs
-`imaging.load`'s feature-space loading) are imaging-specific and stay here."""
-
-from typing import Iterable, Optional, Union
+from typing import Iterable, Optional
 
 import numpy as np
 import pandas as pd
 
-from utils import features as feat
 from utils.reversion import (
     CTRL_PERCENTILE,
     FDR_Q,
@@ -78,86 +84,9 @@ from utils.reversion import (
     _consistency_table,
     _control_mask,
     _promiscuity_gate,
-    _sample_without_replacement,
     _treated_mask,
     compute_axis,
 )
-
-from . import load
-
-CELL_COUNT_COL = "Metadata_cell_count"
-
-
-def load_joint_residualized(
-    feature_space: str,
-    covariates: Union[str, list],
-    baseline_condition: str = "Baseline",
-    stress_condition: str = load.DEFAULT_CONDITION,
-    n_components: Optional[int] = None,
-) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
-    """Load Baseline + `stress_condition` together for `feature_space`, tag
-    each row's `Metadata_condition`, and jointly z-score + residualize the
-    combined matrix so both conditions share one coordinate space.
-
-    `covariates` is a method name from `utils.features.RESIDUALIZE_METHODS`
-    (or a raw Ridge covariate list for `feat.ridge_residualize`). Use
-    `nested_count_plate` (the default in run_reversion.py): every cpg0014
-    plate carries exactly one condition, so a POOLED fit (`count_plate`,
-    `count_batch_plate`) treats the Baseline-stress offset as removable
-    plate structure and destroys the reversion axis itself
-    (docs/batch_effect_conclusions.md); `nested_count_plate` fits the same
-    Ridge correction separately within each condition instead.
-
-    If `n_components` is given, PCA-reduce the RESIDUALIZED matrix to that
-    many components via `feat.reduce_dimensionality`, AFTER residualizing --
-    see docs/pca_resisidualization_decisions.md. Residualizing then
-    PCA-reducing is a measured near-no-op (axis length and the
-    `nominated_robust_ci` compound set are unchanged at k=50/100/200 on
-    CellProfiler/IL6/nested_count_plate); PCA-reducing the raw matrix first
-    is not -- its retained subspace is fit on raw, batch/plate-dominated
-    variance rather than the biology, and it materially changes which
-    compounds clear `gate_promiscuity` (axis length shrinks to ~56% of the
-    unreduced value, hit list only ~30% overlapping).
-
-    Returns (meta, feats_before, feats_after), row-aligned, Baseline rows
-    first -- `feats_before` is the jointly z-scored matrix prior to
-    residualizing (the population `compute_axis` would see without the
-    correction; always the full feature dimension, never PCA-reduced),
-    `feats_after` is the residualized (and, if `n_components` is given,
-    then PCA-reduced) matrix `compute_reversion` actually scores against.
-    Both are handed to `utils.plot.make_reversion_diagnostic_figures` by
-    run_reversion.py to show what the residualization step did to the
-    joint space."""
-    meta_b, feats_b = load.load_feature_space(feature_space, baseline_condition)
-    meta_s, feats_s = load.load_feature_space(feature_space, stress_condition)
-    meta_b = meta_b.copy()
-    meta_b["Metadata_condition"] = baseline_condition
-    meta_s = meta_s.copy()
-    meta_s["Metadata_condition"] = stress_condition
-
-    meta = pd.concat([meta_b, meta_s], ignore_index=True)
-    feats = np.vstack([feats_b, feats_s])
-    feats_before = feat.zscore(feats)
-
-    if isinstance(covariates, str):
-        feats_after = feat.RESIDUALIZE_METHODS[covariates](feats_before, meta)
-    else:
-        feats_after = feat.ridge_residualize(feats_before, meta, covariates)
-
-    if n_components is not None:
-        feats_after = feat.reduce_dimensionality(feats_after, n_components=n_components)
-
-    return meta, feats_before, feats_after
-
-
-def _bootstrap_viability_null(
-    counts_ctrl: np.ndarray, n_reps: int, n_boot: int, rng: np.random.Generator
-) -> np.ndarray:
-    """Viability of `n_boot` fake compounds: the mean `Metadata_cell_count`
-    of `n_reps` Baseline-DMSO wells drawn without replacement, expressed as a
-    fraction of the Baseline-DMSO mean. Calibrates `gate_viability`."""
-    idx = _sample_without_replacement(len(counts_ctrl), n_reps, n_boot, rng)
-    return counts_ctrl[idx].mean(axis=1) / counts_ctrl.mean()
 
 
 def _cytotox_table(
@@ -174,8 +103,9 @@ def _cytotox_table(
     """Gate (3) per compound from each compound's own Baseline-arm wells:
     the on-/off-axis decomposition of that displacement (beta_par, needed
     for gate_beta_par and gate (4)'s rho_int; beta_perp, needed for
-    gate_promiscuity), plus the direct cell-count viability measurement
-    (`viability`, `tau_viab_n`, `gate_viability`).
+    gate_promiscuity). Unlike `imaging.reversion._cytotox_table`, there is
+    no cell-count viability readout here -- see module docstring -- so this
+    returns no `viability`/`gate_viability` columns at all.
 
     Also returns each compound's PER-WELL Baseline-arm on-axis displacement
     (over L), which `_add_specificity` resamples for the `rho_int` CI -- the
@@ -183,14 +113,12 @@ def _cytotox_table(
     only the stress arm would understate its spread."""
     base_ctrl_mask = _condition_mask(meta, baseline_condition) & _control_mask(meta)
     base_ctrl_feats = feats[base_ctrl_mask]
-    base_ctrl_counts = meta.loc[base_ctrl_mask, CELL_COUNT_COL].to_numpy(dtype=float)
 
     base_trt_mask = _condition_mask(meta, baseline_condition) & _treated_mask(
         meta, compound_allowlist
     )
     base_trt_meta = meta.loc[base_trt_mask, ["Metadata_broad_sample"]].reset_index(drop=True)
     base_trt_feats = feats[base_trt_mask]
-    base_trt_counts = meta.loc[base_trt_mask, CELL_COUNT_COL].to_numpy(dtype=float)
 
     rng = np.random.default_rng(seed)
     rows = []
@@ -204,7 +132,6 @@ def _cytotox_table(
         ) / L
         mean_vec = base_trt_feats[idx].mean(axis=0)
         displacement = mean_vec - mu_b
-        viability = float(base_trt_counts[idx].mean() / base_ctrl_counts.mean())
         # Signed on-axis component -- the SAME projection rho measures, but
         # in unstressed cells. Negative means the compound pushes healthy
         # adipocytes toward the stress phenotype, which is the disqualifying
@@ -216,17 +143,12 @@ def _cytotox_table(
             par_null = _bootstrap_beta_par_null(
                 base_ctrl_feats, mu_b, u, L, n_reps, n_boot, rng
             )
-            viab_null = _bootstrap_viability_null(
-                base_ctrl_counts, n_reps, n_boot, rng
-            )
-            null_cache[n_reps] = (
+            null_cache[n_reps] = float(
                 # Lower tail: only a NEGATIVE beta_par beyond noise
                 # disqualifies.
-                float(np.percentile(par_null, 100 - CTRL_PERCENTILE)),
-                # Lower tail: only a cell-count DEFICIT is toxicity.
-                float(np.percentile(viab_null, 100 - CTRL_PERCENTILE)),
+                np.percentile(par_null, 100 - CTRL_PERCENTILE)
             )
-        tau_par_n, tau_viab_n = null_cache[n_reps]
+        tau_par_n = null_cache[n_reps]
         rows.append(
             (
                 compound,
@@ -235,9 +157,6 @@ def _cytotox_table(
                 beta_perp,
                 tau_par_n,
                 beta_par >= tau_par_n,
-                viability,
-                tau_viab_n,
-                viability >= tau_viab_n,
             )
         )
 
@@ -250,9 +169,6 @@ def _cytotox_table(
             "beta_perp",
             "tau_par_n",
             "gate_beta_par",
-            "viability",
-            "tau_viab_n",
-            "gate_viability",
         ],
     ), base_par_by_compound
 
@@ -261,27 +177,28 @@ def compute_reversion(
     meta: pd.DataFrame,
     feats: np.ndarray,
     baseline_condition: str = "Baseline",
-    stress_condition: str = load.DEFAULT_CONDITION,
+    stress_condition: str = "FFA",
     n_boot: int = N_BOOT,
     seed: int = SEED,
     compound_allowlist: Optional[Iterable[str]] = None,
 ) -> dict:
-    """Full reversion scoring for one (jointly residualized) feature space.
-    `meta`/`feats` must come from `load_joint_residualized` (or an
-    equivalent joint load covering both `baseline_condition` and
-    `stress_condition`, row-aligned).
+    """Full reversion scoring for one jointly-residualized proteomic feature
+    matrix. `meta`/`feats` must jointly cover `baseline_condition` and
+    `stress_condition`, row-aligned, already z-scored/residualized in a
+    shared coordinate space (see `proteomics.concordance.condition_hits`).
 
     Returns a dict with `per_compound` (one row per scored compound, sorted
     by `RI_spec` descending, with every gate column plus `nominated_robust`
     and `nominated_robust_ci`), `L` (axis length), `n_nominated_robust(_ci)`,
     `funnel` (per-gate survivor counts conditional on gate 2, for localising
-    a hit-count change to the gate responsible), `n_toxic`, and run metadata.
+    a hit-count change to the gate responsible), and run metadata. There is
+    no `n_toxic` here -- see module docstring on the dropped viability gate.
 
     `compound_allowlist`, if given, restricts every treated-well population
     (both the stress-arm consistency gate and the compound's own
     Baseline-arm gates) to `Metadata_broad_sample` values in the list --
-    e.g. compounds already called active by `utils.copairs`. DMSO
-    controls are never filtered."""
+    e.g. compounds already called active by `utils.copairs`.
+    DMSO controls are never filtered."""
     mu_b, mu_s, u, L = compute_axis(meta, feats, baseline_condition, stress_condition)
 
     # On-axis displacement of each Baseline-DMSO well from its own centroid:
@@ -303,13 +220,12 @@ def compute_reversion(
     )
     per_compound["gate_promiscuity"] = _promiscuity_gate(per_compound["beta_perp"])
 
+    # Consistency (2) + robustness (2b, LOO) + not toxic/promiscuous (3,
+    # gate_viability dropped -- see module docstring) + stress-specific (4).
     gate3 = (
         per_compound["gate_beta_par"].fillna(False)
-        & per_compound["gate_viability"].fillna(False)
         & per_compound["gate_promiscuity"].fillna(False)
     )
-    # Consistency (2) + robustness (2b, LOO) + not cytotoxic/promiscuous (3)
-    # + stress-specific (4).
     per_compound["nominated_robust"] = (
         per_compound["gate_consistency_mean"]
         & per_compound["gate_loo_robust"]
@@ -349,7 +265,6 @@ def compute_reversion(
             k: int((per_compound["gate_consistency_mean"] & v.fillna(False)).sum())
             for k, v in {
                 "beta_par": per_compound["gate_beta_par"],
-                "viability": per_compound["gate_viability"],
                 "promiscuity": per_compound["gate_promiscuity"],
                 "specificity": per_compound["gate_specificity"],
             }.items()
@@ -376,7 +291,6 @@ def compute_reversion(
             ),
         },
         "fdr_q": FDR_Q,
-        "n_toxic": int((~per_compound["gate_viability"].fillna(True)).sum()),
         "n_boot": n_boot,
         "seed": seed,
         "baseline_condition": baseline_condition,

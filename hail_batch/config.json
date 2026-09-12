@@ -8,7 +8,7 @@
   },
   "repo": {
     "url": "https://github.com/AMCalejandro/cellpainting-analyses.git",
-    "branch": "reversion-condition-nested"
+    "branch": "feature_space_benchmark"
   },
   "data-files": {
     "metadata_cpg0014.tsv": "gs://nnf-amc/data/cp-imaging-adi/averages/metadata_cpg0014.tsv",
@@ -28,5 +28,17 @@
     "covariate-sets": ["count", "count_batch", "count_plate", "count_batch_plate", "control_centered"],
     "null-size": 10000,
     "preprocess": false
+  },
+  "proteomics-data-files": {
+    "brd4_all-plates_normalized-nelisa-signal_sample.csv": "gs://nnf-amc/data/cp-imaging-adi/proteomics/brd4_all-plates_normalized-nelisa-signal_sample.csv"
+  },
+  "proteomics-output-dir": "gs://nnf-amc/project/cp-imaging-adi/results/proteomics_copairs/",
+  "proteomics-pipeline": {
+    "conditions": ["FFA", "IL6"],
+    "processed": [true],
+    "method": ["nested", "control_centered"],
+    "covariates": ["plate", "batch", "batch_plate"],
+    "null-size": 10000,
+    "consistency-groupby": "Metadata_target"
   }
 }
