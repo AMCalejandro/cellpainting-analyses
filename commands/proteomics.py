@@ -1,4 +1,4 @@
-"""`proteomics` command group: processing, copairs, concordance,
+"""`proteomics` command group: processing, copairs, tier_e, concordance,
 batch_report.
 
 Moved from the former root `run_proteomics_pipeline.py` /
@@ -6,7 +6,9 @@ Moved from the former root `run_proteomics_pipeline.py` /
 `run_proteomic_normalization_bakeoff.py` scripts -- logic unchanged, see each
 `*_main` docstring below for what it does. `processing` and `batch_report`
 here were originally named `pipeline` and `normalization-bakeoff`,
-respectively.
+respectively. `tier_e` is new: the proteomics analogue of `benchmark run`'s
+Tier E, driving `proteomics.benchmark` (see its docstring for why that's a
+separate implementation from `imaging.benchmark`, not a shared one).
 """
 
 import argparse
@@ -25,13 +27,17 @@ from utils import plot
 from imaging import batch_report as br
 from imaging import benchmark as bm
 from proteomics import batch_report as pbr
+from proteomics import benchmark as pbm
 from proteomics import concordance as pconc
+from proteomics import correction as pcorr
+from proteomics import imaging_metadata as pim
 from proteomics import paths as prote_paths
 from proteomics import pipeline
 
 FEATURE_SPACES = ["CellProfiler", "CPCNN", "UniDino"]
 COPAIRS_CONDITIONS = ["FFA", "IL6"]
 CONCORDANCE_STRESS_CONDITIONS = ["FFA", "IL6"]
+TIER_E_MOA_FDR_Q = 0.10
 
 
 # --- processing (formerly run_proteomics_pipeline.py, CLI name "pipeline") --
@@ -110,15 +116,26 @@ def _run_processing(args: argparse.Namespace) -> None:
 # --- copairs (formerly run_proteomics_copairs.py) ---------------------------
 
 
-def _processed_tag(processed: bool, method: str, covariates: list) -> str:
-    return f"{method}_{'_'.join(covariates)}" if processed else "raw"
+def _processed_tag(processed: bool, method: str, covariate_set: str) -> str:
+    return f"{method}_{covariate_set}" if processed else "raw"
+
+
+# Default tag sweep for `tier_e` (and the copairs comparison figure): raw
+# plus both correction methods at each of hail_batch/config.json's covariate
+# sets -- matches the `proteomics copairs` runs already available under
+# results/proteomics/copairs/.
+DEFAULT_TIER_E_PROCESSED_TAGS = [_processed_tag(False, "", "")] + [
+    _processed_tag(True, method, covariate_set)
+    for method in ("nested", "control_centered")
+    for covariate_set in pcorr.COVARIATE_SETS
+]
 
 
 def copairs_main(
     conditions: list,
     processed: bool,
     method: str,
-    covariates: list,
+    covariate_sets: list,
     null_size: int,
     consistency_groupby: str,
     use_cache: bool,
@@ -132,21 +149,17 @@ def copairs_main(
     summary figure into <out-dir>/figures/.
 
     This is the proteomics analogue of the `imaging copairs` command:
-    `processed` plays the role of `preprocess` there.
+    `processed` plays the role of `preprocess` there, and -- when
+    `processed` is true -- `covariate_sets` (`proteomics.correction.
+    COVARIATE_SETS` keys) is swept one full run at a time exactly like
+    `imaging copairs`' `--covariate-sets`. `processed=False` skips
+    `method`/`covariate_sets` entirely (see `proteomics.pipeline.
+    load_raw_proteomics`) and runs a single "raw" pass.
     """
     parquet_dir = out_dir / "parquet"
     ap_cache_dir = out_dir / "ap_cache"
     parquet_dir.mkdir(parents=True, exist_ok=True)
     ap_cache_dir.mkdir(parents=True, exist_ok=True)
-
-    if processed:
-        meta, X = pipeline.load_corrected_proteomics(
-            covariates=covariates, method=method, use_cache=use_cache
-        )
-    else:
-        meta, X = pipeline.load_raw_proteomics(use_cache=use_cache)
-    feats = X.to_numpy(dtype="float64")
-    processed_tag = _processed_tag(processed, method, covariates)
 
     consistency_tag = "" if consistency_groupby == cp.DEFAULT_CONSISTENCY_GROUPBY else "_moa"
     call_fns = {
@@ -158,36 +171,50 @@ def copairs_main(
     }
     call_tags = {"consistency": consistency_tag}
 
-    for condition in conditions:
-        cond_mask = (meta["Metadata_condition"] == condition).to_numpy()
-        cond_meta = meta.loc[cond_mask].reset_index(drop=True)
-        cond_feats = feats[cond_mask]
-        cond_meta, cond_feats = pconc.drop_unannotated(cond_meta, cond_feats, condition)
+    covariate_sets_to_run = covariate_sets if processed else [None]
+    processed_tags = []
 
-        for call_name, fn in call_fns.items():
-            file_stub = f"proteomics_{condition}_{processed_tag}_{call_name}{call_tags.get(call_name, '')}"
-            out_path = parquet_dir / f"{file_stub}.parquet"
-            if out_path.exists():
-                print(f"[{condition}/{processed_tag}/{call_name}] cached, skipping", flush=True)
-                continue
-            t0 = time.time()
-            df = fn(
-                cond_meta,
-                cond_feats,
-                null_size=null_size,
-                cache_dir=prote_paths.NULL_CACHE_DIR,
-                ap_cache_path=ap_cache_dir / f"{file_stub}.parquet",
+    for covariate_set in covariate_sets_to_run:
+        if processed:
+            meta, X = pipeline.load_corrected_proteomics(
+                covariates=pcorr.COVARIATE_SETS[covariate_set], method=method, use_cache=use_cache
             )
-            df.to_parquet(out_path)
-            n_calls = int(df["below_corrected_p"].sum())
-            print(
-                f"[{condition}/{processed_tag}/{call_name}] {n_calls}/{len(df)} calls "
-                f"in {time.time() - t0:.1f}s -> {out_path.name}",
-                flush=True,
-            )
+        else:
+            meta, X = pipeline.load_raw_proteomics(use_cache=use_cache)
+        feats = X.to_numpy(dtype="float64")
+        processed_tag = _processed_tag(processed, method, covariate_set)
+        processed_tags.append(processed_tag)
+
+        for condition in conditions:
+            cond_mask = (meta["Metadata_condition"] == condition).to_numpy()
+            cond_meta = meta.loc[cond_mask].reset_index(drop=True)
+            cond_feats = feats[cond_mask]
+            cond_meta, cond_feats = pconc.drop_unannotated(cond_meta, cond_feats, condition)
+
+            for call_name, fn in call_fns.items():
+                file_stub = f"proteomics_{condition}_{processed_tag}_{call_name}{call_tags.get(call_name, '')}"
+                out_path = parquet_dir / f"{file_stub}.parquet"
+                if out_path.exists():
+                    print(f"[{condition}/{processed_tag}/{call_name}] cached, skipping", flush=True)
+                    continue
+                t0 = time.time()
+                df = fn(
+                    cond_meta,
+                    cond_feats,
+                    null_size=null_size,
+                    cache_dir=prote_paths.NULL_CACHE_DIR,
+                    ap_cache_path=ap_cache_dir / f"{file_stub}.parquet",
+                )
+                df.to_parquet(out_path)
+                n_calls = int(df["below_corrected_p"].sum())
+                print(
+                    f"[{condition}/{processed_tag}/{call_name}] {n_calls}/{len(df)} calls "
+                    f"in {time.time() - t0:.1f}s -> {out_path.name}",
+                    flush=True,
+                )
 
     fig_path = plot.make_proteomics_copairs_summary_figure(
-        out_dir, conditions, [processed_tag], consistency_groupby
+        out_dir, conditions, processed_tags, consistency_groupby
     )
     print(f"Saved figure -> {fig_path}", flush=True)
 
@@ -221,7 +248,12 @@ def add_copairs_parser(parser: argparse.ArgumentParser) -> None:
         "--covariates",
         type=str,
         default=",".join(pipeline.DEFAULT_COVARIATES),
-        help="Comma-separated proteomics.correction covariates, only used when --processed true.",
+        help=(
+            "Comma-separated proteomics.correction.COVARIATE_SETS keys "
+            "(plate, batch, batch_plate), only used when --processed true. "
+            "One full copairs run (own processed_tag/parquet files) per "
+            "entry, mirroring `imaging copairs`'s --covariate-sets sweep."
+        ),
     )
     parser.add_argument("--null-size", type=int, default=cp.NULL_SIZE)
     parser.add_argument(
@@ -251,6 +283,99 @@ def _run_copairs(args: argparse.Namespace) -> None:
         args.consistency_groupby,
         not args.no_cache,
         Path(args.out_dir),
+    )
+
+
+# --- tier_e (new: proteomics analogue of `benchmark run`'s Tier E) ---------
+
+
+def tier_e_main(
+    conditions: list,
+    processed_tags: list,
+    copairs_dir: Path,
+    moa_fdr_q: float,
+    n_perm: int,
+    seed: int,
+) -> None:
+    """E3 only: MoA/target preranked-GSEA enrichment of the copairs
+    allowlist (active ∩ distinctive), per (condition, processed_tag) -- the
+    proteomics analogue of `benchmark run`'s Tier E E3 panel
+    (`imaging.benchmark.copairs_call_enrichment`), computed by
+    `proteomics.benchmark` instead (see that module's docstring for why
+    it's a separate implementation, not a shared one, and for the
+    representation -> processed_tag swap).
+
+    Reads already-computed `proteomics copairs` parquets from
+    `<copairs_dir>/parquet/` -- run that command once per `processed_tags`
+    entry first (`_processed_tag` derives the tag `proteomics copairs`
+    itself used, from `--processed`/`--method`/`--covariates`).
+
+    Saves one `{tag}_{condition}_tier_e_summary.json` per (tag, condition)
+    and the `proteomics_tier_e_copairs_agreement.png` figure under
+    `copairs_dir`."""
+    annotation = (
+        pim.load_hwat_imaging_metadata()[["Metadata_broad_sample", "Metadata_moa", "Metadata_target"]]
+        .drop_duplicates("Metadata_broad_sample")
+    )
+
+    summary_rows = []
+    for condition in conditions:
+        for tag in processed_tags:
+            act = pbm.activity_and_distinctiveness(copairs_dir, condition, tag)
+            moa = pbm.copairs_call_enrichment(
+                copairs_dir, condition, tag, "allowlist", annotation,
+                moa_col="Metadata_moa", n_perm=n_perm, seed=seed,
+            )
+            target = pbm.copairs_call_enrichment(
+                copairs_dir, condition, tag, "allowlist", annotation,
+                moa_col="Metadata_target", n_perm=n_perm, seed=seed,
+            )
+            n_moa_sig = int((moa["q_perm"] <= moa_fdr_q).sum()) if len(moa) else 0
+            n_target_sig = int((target["q_perm"] <= moa_fdr_q).sum()) if len(target) else 0
+            print(
+                f"[{tag}/{condition}] allowlist={len(act['allowlist'])} compounds; "
+                f"MoA enrichment {n_moa_sig}/{len(moa)}, target enrichment "
+                f"{n_target_sig}/{len(target)} significant at q<={moa_fdr_q}",
+                flush=True,
+            )
+            summary = {
+                "processed_tag": tag,
+                "condition": condition,
+                "copairs_allowlist_moa_n_significant_q10": n_moa_sig,
+                "copairs_allowlist_target_n_significant_q10": n_target_sig,
+            }
+            (copairs_dir / f"{tag}_{condition}_tier_e_summary.json").write_text(json.dumps(summary, indent=2))
+            summary_rows.append(summary)
+
+    fig_path = plot.make_proteomics_tier_e_figure(pd.DataFrame(summary_rows), copairs_dir / "figures")
+    print(f"Saved {fig_path}", flush=True)
+
+
+def add_tier_e_parser(parser: argparse.ArgumentParser) -> None:
+    parser.description = (
+        "Proteomics Tier E3: MoA/target enrichment of the copairs allowlist, "
+        "from already-saved `proteomics copairs` results."
+    )
+    parser.add_argument("--conditions", type=str, default=",".join(COPAIRS_CONDITIONS))
+    parser.add_argument(
+        "--processed-tags", type=str, default=",".join(DEFAULT_TIER_E_PROCESSED_TAGS),
+        help="Comma-separated processed_tag values (as `proteomics copairs` derived them via _processed_tag).",
+    )
+    parser.add_argument("--copairs-dir", type=str, default=str(prote_paths.COPAIRS_RESULTS_DIR))
+    parser.add_argument("--moa-fdr-q", type=float, default=TIER_E_MOA_FDR_Q)
+    parser.add_argument("--n-perm", type=int, default=20000)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.set_defaults(func=_run_tier_e)
+
+
+def _run_tier_e(args: argparse.Namespace) -> None:
+    tier_e_main(
+        args.conditions.split(","),
+        args.processed_tags.split(","),
+        Path(args.copairs_dir),
+        args.moa_fdr_q,
+        args.n_perm,
+        args.seed,
     )
 
 

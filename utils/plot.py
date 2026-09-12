@@ -28,6 +28,11 @@ across driver modules.
   make_benchmark_figures.py -- grouped bars, one color per representation
   (`REPRESENTATION_COLORS`, fixed order/hue across all four so the same
   representation reads as the same color everywhere).
+- `make_proteomics_tier_e_figure`: `commands.proteomics.tier_e_main`'s
+  E3-only analogue of `make_tier_e_figure` for the single-feature-space
+  proteomics pipeline -- `processed_tag` (raw/nested/control_centered) plays
+  the representation role, colored with a `tab10` palette rather than the
+  fixed `REPRESENTATION_COLORS` mapping.
 
 All are meant for direct use (e.g. called from run_pipeline.py right after
 loading/residualizing) rather than as `__main__`-guarded scripts.
@@ -90,6 +95,15 @@ CALLS = [
     ),
     ("consistency", "Consistency calls", "Same target vs different targets", "Target groups"),
 ]
+# `make_proteomics_copairs_summary_figure` puts multiple conditions in ONE
+# figure (unlike `make_copairs_summary_figure`, one figure per condition), so
+# CALLS' distinctiveness subtitle -- the only one with a `{condition}` slot --
+# can't be filled with a single condition name there; each x-axis group is
+# already labeled with its own condition, so this static phrasing covers it
+# without an awkward "FFA/IL6"-style join.
+PROTEOMICS_CALL_SUBTITLE_OVERRIDES = {
+    "distinctiveness": "Same compound vs other compounds in the same condition",
+}
 # Overrides for CALLS' consistency entry (subtitle, unit) when grouping by
 # something other than the default Metadata_target.
 CONSISTENCY_GROUPBY_LABELS = {
@@ -242,7 +256,7 @@ def make_proteomics_copairs_summary_figure(
     calls = [
         (call_name, title, *CONSISTENCY_GROUPBY_LABELS.get(consistency_groupby, (subtitle, unit)))
         if call_name == "consistency"
-        else (call_name, title, subtitle, unit)
+        else (call_name, title, PROTEOMICS_CALL_SUBTITLE_OVERRIDES.get(call_name, subtitle), unit)
         for call_name, title, subtitle, unit in CALLS
     ]
 
@@ -261,6 +275,14 @@ def make_proteomics_copairs_summary_figure(
 
     for col, (call_name, title, subtitle, unit) in enumerate(calls):
         ax_bar, ax_violin = axes[0, col], axes[1, col]
+        # Each condition has its own compound/target universe (unlike
+        # make_copairs_summary_figure's single shared `condition`), but that
+        # universe doesn't depend on `tag` (same panel, just corrected
+        # differently) -- so one "(n=...)" per condition, on the x-tick,
+        # mirrors the reference figure's plain-count bar labels + single
+        # shared "called out of N" denominator instead of cluttering every
+        # bar with its own "x/y" fraction.
+        n_per_condition = [len(results[(c, processed_tags[0], call_name)]) for c in conditions]
 
         group_width = 0.8
         n_tags = len(processed_tags)
@@ -275,12 +297,8 @@ def make_proteomics_copairs_summary_figure(
                 n_calls = int(df["below_corrected_p"].sum())
                 x = cond_ix + (tag_ix - (n_tags - 1) / 2) * bar_width
                 ax_bar.bar(x, n_calls, width=bar_width * 0.95, color=tag_colors[tag])
-                # Each condition has its own compound/target universe, unlike
-                # make_copairs_summary_figure's single shared `condition` --
-                # so annotate every bar with its own denominator rather than
-                # one figure-wide "out of N" ylabel.
                 ax_bar.text(
-                    x, n_calls, f"{n_calls}/{len(df)}", ha="center", va="bottom", fontsize=7,
+                    x, n_calls, str(n_calls), ha="center", va="bottom", fontsize=8,
                 )
 
                 nmap = df["normalized_average_precision"].dropna().to_numpy()
@@ -289,8 +307,10 @@ def make_proteomics_copairs_summary_figure(
                 violin_colors.append(tag_colors[tag])
 
         ax_bar.set_xticks(range(len(conditions)))
-        ax_bar.set_xticklabels(conditions)
-        ax_bar.set_title(f"{title}\n{subtitle.format(condition='/'.join(conditions))}", fontsize=12)
+        ax_bar.set_xticklabels(
+            [f"{c}\n(out of {n:,})" for c, n in zip(conditions, n_per_condition)]
+        )
+        ax_bar.set_title(f"{title}\n{subtitle}", fontsize=12)
         ax_bar.set_ylabel(f"{unit} called")
 
         parts = ax_violin.violinplot(
@@ -553,15 +573,19 @@ def make_covariate_comparison_figure(
 def _grouped_bars(
     ax, categories: list, representations: list, values: dict,
     value_fmt: str = "{:.2f}", ylim: Optional[tuple] = None,
+    colors: Optional[dict] = None,
 ) -> None:
-    """One bar per (category, representation), colored by
-    `REPRESENTATION_COLORS`. `values[rep][category]` is the bar height;
+    """One bar per (category, representation), colored by `colors` (default
+    `REPRESENTATION_COLORS`; pass a different {key: color} mapping for an
+    axis whose groups aren't CellProfiler/CPCNN/UniDino -- e.g. proteomics'
+    processed_tag axis). `values[rep][category]` is the bar height;
     missing/NaN is drawn as a zero-height bar labeled "n/a" rather than
     silently omitted -- e.g. too few reversion nominees to compute a
     stability/effect-size estimate is itself informative, not a zero.
     `ylim`, if given, is applied BEFORE placing value labels (not after --
     labels offset from an autoscaled range that a caller then zooms
     end up floating outside the visible axes)."""
+    colors = REPRESENTATION_COLORS if colors is None else colors
     n_reps = len(representations)
     width = 0.8 / n_reps
     x = np.arange(len(categories))
@@ -572,7 +596,7 @@ def _grouped_bars(
         offsets = x + (i - (n_reps - 1) / 2) * width
         bars = ax.bar(
             offsets, heights, width=width * 0.9,
-            color=REPRESENTATION_COLORS.get(rep, "#888888"), label=rep, zorder=3,
+            color=colors.get(rep, "#888888"), label=rep, zorder=3,
         )
         bar_groups.append((bars, raw))
 
@@ -871,6 +895,78 @@ def make_tier_e_figure(
     fig.tight_layout()
 
     out_path = out_dir / "tier_e_copairs_agreement.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def make_proteomics_tier_e_figure(
+    summary_rows: pd.DataFrame,
+    out_dir: Path,
+) -> Path:
+    """Proteomics Tier E, E3 only: MoA/target preranked-GSEA enrichment of
+    the copairs allowlist (active ∩ distinctive), per (condition,
+    processed_tag) -- computed by `commands.proteomics.tier_e_main`
+    (`proteomics.benchmark` -- a separate implementation from
+    `imaging.benchmark`, not a reuse of it, per this repo's
+    module-independence rule; see that module's docstring). Proteomics has
+    no "representation" axis -- a single feature space -- so `processed_tag`
+    (raw vs. a batch/plate-corrected variant) plays that role instead, the
+    same swap `make_proteomics_copairs_summary_figure` already makes for the
+    copairs summary figure -- including its `tab10` palette convention
+    rather than imaging Tier E's fixed `REPRESENTATION_COLORS`.
+
+    `summary_rows` is the `{tag}_{condition}_tier_e_summary.json` rows
+    `tier_e_main` writes (one per (processed_tag, condition))."""
+    processed_tags = sorted(summary_rows["processed_tag"].unique())
+    conditions = list(dict.fromkeys(summary_rows["condition"]))
+    palette = plt.get_cmap("tab10").colors
+    tag_colors = {tag: palette[i % len(palette)] for i, tag in enumerate(processed_tags)}
+
+    def _values(col):
+        return {
+            tag: dict(
+                zip(
+                    summary_rows.loc[summary_rows["processed_tag"] == tag, "condition"],
+                    summary_rows.loc[summary_rows["processed_tag"] == tag, col],
+                )
+            )
+            for tag in processed_tags
+        }
+
+    panels = [
+        (
+            "copairs_allowlist_moa_n_significant_q10",
+            "E3 -- MoA enrichment\n(allowlist)",
+            "n MoA terms (q<=0.10)",
+            "{:.0f}",
+        ),
+        (
+            "copairs_allowlist_target_n_significant_q10",
+            "E3 -- target enrichment\n(allowlist)",
+            "n target terms (q<=0.10)",
+            "{:.0f}",
+        ),
+    ]
+    fig, axes = plt.subplots(1, len(panels), figsize=(6 * len(panels), 4.5))
+    for ax, (col, title, ylabel, fmt) in zip(axes, panels):
+        _grouped_bars(ax, conditions, processed_tags, _values(col), value_fmt=fmt, colors=tag_colors)
+        ax.set_title(title, fontsize=10)
+        ax.set_ylabel(ylabel)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    fig.legend(
+        handles, labels, loc="upper center", ncol=len(processed_tags),
+        bbox_to_anchor=(0.5, 1.15), frameon=False,
+    )
+    fig.suptitle(
+        "Tier E3 -- MoA/target enrichment of the copairs allowlist (proteomics)",
+        fontsize=12, y=1.28,
+    )
+    fig.tight_layout()
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / "proteomics_tier_e_copairs_agreement.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return out_path

@@ -83,9 +83,11 @@ def _add_proteomics_jobs(b: "hb.Batch", config: dict, hb_cfg: dict, repo_cfg: di
     """One job per (`processed`, `method`) combination -- same one-axis-
     per-job split `_add_imaging_jobs` uses for imaging conditions, just with
     `--processed`/`--method` as the new axes instead of `--condition`.
-    `--conditions` (FFA/IL6) is swept in-process by `cli.py proteomics
-    copairs` within each job, matching how each imaging job already sweeps
-    --feature-spaces/--covariate-sets in-process.
+    `--conditions` (FFA/IL6) and `--covariates` (proteomics.correction.
+    COVARIATE_SETS keys, e.g. plate/batch/batch_plate) are both swept
+    in-process by `cli.py proteomics copairs` within each job -- one full
+    copairs run per covariates entry -- matching how each imaging job
+    already sweeps --feature-spaces/--covariate-sets in-process.
 
     `method` (and `covariates`) only affect the batch/plate correction step,
     which `--processed false` skips entirely (see `proteomics.pipeline.

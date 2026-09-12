@@ -17,7 +17,7 @@ this property (see utils.features docstring) and are not supported here.
 
 Tiers implemented: A (technical quality -- A1 via `imaging.batch_report`
 directly, A2 via `activity_and_distinctiveness`), B1
-(`condition_separability`), C1-C3 (`hit_overlap`,
+(`condition_separability`), C1-C3 (`utils.copairs.hit_overlap`,
 `replicate_split_stability`, `effect_size_separation`), E (copairs-level
 cross-representation/cross-condition agreement and biological
 plausibility -- see below). B2 and Tier D are stubbed
@@ -28,18 +28,22 @@ respectively -- see their docstrings.
 Tier E runs entirely on run_pipeline.py's existing copairs calls, one step
 upstream of reversion, so it's available for every scored compound/
 condition regardless of whether reversion ever ran on it:
-  - `hit_overlap` (reused, not new) on activity-only, distinctiveness-only,
-    allowlist and consistency-called-term sets, within one condition across
-    representations (E1) or, via `run_cellrep_benchmark.py`'s cross-
-    condition loop, for one representation across stress conditions (E2) --
-    `mean_pairwise_jaccard` pulls a single per-key agreement summary out of
-    either table.
+  - `utils.copairs.hit_overlap` (reused, not new) on activity-only,
+    distinctiveness-only, allowlist and consistency-called-term sets,
+    within one condition across representations (E1) or, via
+    `run_cellrep_benchmark.py`'s cross-condition loop, for one
+    representation across stress conditions (E2) --
+    `utils.copairs.mean_pairwise_jaccard` pulls a single per-key agreement
+    summary out of either table.
   - `copairs_call_enrichment`: MoA/target preranked-GSEA enrichment
-    (`imaging.bio_enrichment.moa_enrichment`) among a condition's
+    (`utils.bio_enrichment.moa_enrichment`) among a condition's
     activity/distinctiveness/allowlist compounds (E3) -- e.g. are IL6
-    hits enriched for anti-inflammatory MoAs? `consistency_called_terms`
+    hits enriched for anti-inflammatory MoAs? `utils.copairs.consistency_called_terms`
     is the equivalent readout for the consistency call, which is already a
-    per-term test rather than a compound pool to permute.
+    per-term test rather than a compound pool to permute. These hit-set/
+    enrichment helpers are domain-agnostic and live in `utils` (not here) so
+    the proteomics side of Tier E can reuse them without importing this
+    module -- see `utils.copairs`'s "hit-set agreement" section.
 
 A2 (and the reversion compound_allowlist) reuse run_pipeline.py's ALREADY
 COMPUTED activity/distinctiveness calls (see cli.sh) instead of rerunning
@@ -66,11 +70,11 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_auc_score
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 
+from utils import bio_enrichment
 from utils import copairs as cp
 from utils import features as feat
 
 from . import batch_report as br
-from . import bio_enrichment
 from . import load
 from . import paths
 from . import reversion as rev
@@ -327,37 +331,12 @@ def copairs_call_enrichment(
     min()s actually differ, only disambiguate exact ties."""
     if call_name == "allowlist":
         act = activity_and_distinctiveness(feature_space, condition, covariate_set, results_dir)
-        df = act["activity_table"].merge(
-            act["distinctiveness_table"][["Metadata_broad_sample", score_col]],
-            on="Metadata_broad_sample",
-            suffixes=("_activity", "_distinctiveness"),
-        )
-        pct_activity = df[f"{score_col}_activity"].rank(pct=True)
-        pct_distinctiveness = df[f"{score_col}_distinctiveness"].rank(pct=True)
-        pct = pd.concat([pct_activity, pct_distinctiveness], axis=1)
-        tiebreak = (pct_activity + pct_distinctiveness) / (2 * (len(df) + 1) ** 2)
-        df[score_col] = pct.min(axis=1) + tiebreak
+        df = cp.combine_allowlist_ranks(act["activity_table"], act["distinctiveness_table"], score_col)
     else:
         df = load_existing_copairs_call(feature_space, condition, call_name, covariate_set, results_dir)
     annotated = annotate_compound_table(df, condition)
     return bio_enrichment.moa_enrichment(
         annotated, score_col=score_col, moa_col=moa_col, n_perm=n_perm, seed=seed
-    )
-
-
-def consistency_called_terms(consistency_df: pd.DataFrame) -> pd.DataFrame:
-    """The consistency call's own called groups (below_corrected_p), sorted
-    by normalized AP descending -- unlike activity/distinctiveness, a
-    consistency call is already a per-term (Metadata_target or
-    Metadata_moa, whichever `compute_consistency` was grouped by) test, so
-    "which terms are enriched" is just this call's hit list rather than a
-    separate permutation enrichment over a compound pool."""
-    groupby_col = "Metadata_target" if "Metadata_target" in consistency_df.columns else "Metadata_moa"
-    return (
-        consistency_df.loc[consistency_df["below_corrected_p"]]
-        .sort_values("normalized_average_precision", ascending=False)
-        .reset_index(drop=True)
-        .rename(columns={groupby_col: "term"})
     )
 
 
@@ -398,34 +377,6 @@ def known_effect_validation(*_args, **_kwargs):
     `rho_int` from `imaging.reversion.compute_reversion`'s per_compound
     table against `expected_direction`."""
     raise NotImplementedError("B2 needs a biology-team reference-compound list; see docstring")
-
-
-def jaccard(a: set, b: set) -> float:
-    if not a and not b:
-        return float("nan")
-    return len(a & b) / len(a | b)
-
-
-def hit_overlap(hit_sets: dict) -> pd.DataFrame:
-    """C1: pairwise Jaccard index of hit sets (one set per representation)."""
-    names = list(hit_sets)
-    rows = [
-        {"a": a, "b": b, "jaccard": jaccard(hit_sets[a], hit_sets[b])}
-        for i, a in enumerate(names)
-        for b in names[i + 1 :]
-    ]
-    return pd.DataFrame(rows, columns=["a", "b", "jaccard"])
-
-
-def mean_pairwise_jaccard(overlap_df: pd.DataFrame, name: str) -> float:
-    """Mean Jaccard of `name` (a representation, from a within-condition
-    `hit_overlap`, or a condition, from a cross-condition one) against every
-    other key in a `hit_overlap` pairwise table -- a single per-key
-    agreement summary pulled from the same table `hit_overlap` already
-    returns, instead of a separate all-vs-one computation. NaN if `name`
-    doesn't appear (e.g. a single-representation/single-condition run)."""
-    rows = overlap_df[(overlap_df["a"] == name) | (overlap_df["b"] == name)]
-    return float(rows["jaccard"].mean()) if len(rows) else float("nan")
 
 
 def split_replicate_wells_loo(
@@ -531,8 +482,8 @@ def replicate_split_stability(
                 per_compound.loc[per_compound["nominated_robust_ci"], "Metadata_broad_sample"]
             )
             halves.append((active, reverted, per_compound))
-        activity_jaccards.append(jaccard(halves[0][0], halves[1][0]))
-        reversion_jaccards.append(jaccard(halves[0][1], halves[1][1]))
+        activity_jaccards.append(cp.jaccard(halves[0][0], halves[1][0]))
+        reversion_jaccards.append(cp.jaccard(halves[0][1], halves[1][1]))
 
         scores = halves[0][2][["Metadata_broad_sample", "RI_spec"]].merge(
             halves[1][2][["Metadata_broad_sample", "RI_spec"]],
@@ -621,7 +572,7 @@ def _pair_stats(a: set, b: set) -> dict:
     alone can hide a big size mismatch (e.g. a=1/b=50 with 1 shared member
     scores the same 0.02 as a=25/b=25 with 1 shared member)."""
     return {
-        "jaccard": jaccard(a, b),
+        "jaccard": cp.jaccard(a, b),
         "n_a": len(a),
         "n_b": len(b),
         "n_both": len(a & b),

@@ -17,12 +17,12 @@ from typing import Optional
 
 import pandas as pd
 
+from utils import bio_enrichment
 from utils import copairs as cp
 from utils import features as feat
 from utils import plot
 
 from imaging import batch_report as br
-from imaging import bio_enrichment
 from imaging import load, paths
 from imaging import reversion as rev
 
@@ -506,7 +506,7 @@ def add_reversion_parser(parser: argparse.ArgumentParser) -> None:
         "--moa-enrichment",
         action="store_true",
         help=(
-            "Also run imaging.bio_enrichment.moa_enrichment on the scored "
+            "Also run utils.bio_enrichment.moa_enrichment on the scored "
             "per_compound table (post-hoc, not part of selection) and save "
             "it as {file_stub}_moa_enrichment.csv."
         ),

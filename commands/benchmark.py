@@ -14,11 +14,12 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from utils import bio_enrichment
+from utils import copairs as cp
 from utils import plot
 
 from imaging import batch_report as br
 from imaging import benchmark as bm
-from imaging import bio_enrichment
 from imaging import paths
 from imaging import reversion as rev
 
@@ -126,7 +127,7 @@ def run_main(
             # allowlist, both computed upstream of (and independent from)
             # reversion.
             consistency_df = bm.load_existing_copairs_call(space, condition, "consistency", copairs_covariate_set)
-            called_terms = bm.consistency_called_terms(consistency_df)
+            called_terms = cp.consistency_called_terms(consistency_df)
             called_terms.to_csv(out_dir / f"{space}_{condition}_consistency_called_terms.csv", index=False)
             hit_sets_consistency[space] = set(called_terms["term"])
             cross_condition_hit_sets["consistency"][space][condition] = hit_sets_consistency[space]
@@ -211,11 +212,11 @@ def run_main(
         # here (rather than after the C3 loop below, where it used to live)
         # so `mean_pairwise_jaccard` can fold a per-representation summary
         # into that representation's `summary` dict.
-        overlap_active = bm.hit_overlap(hit_sets_active)
-        overlap_reversion = bm.hit_overlap(hit_sets_reversion)
-        overlap_activity = bm.hit_overlap(hit_sets_activity)
-        overlap_distinctiveness = bm.hit_overlap(hit_sets_distinctiveness)
-        overlap_consistency = bm.hit_overlap(hit_sets_consistency)
+        overlap_active = cp.hit_overlap(hit_sets_active)
+        overlap_reversion = cp.hit_overlap(hit_sets_reversion)
+        overlap_activity = cp.hit_overlap(hit_sets_activity)
+        overlap_distinctiveness = cp.hit_overlap(hit_sets_distinctiveness)
+        overlap_consistency = cp.hit_overlap(hit_sets_consistency)
         overlap_active.to_csv(out_dir / f"{condition}_hit_overlap_active.csv", index=False)
         overlap_reversion.to_csv(out_dir / f"{condition}_hit_overlap_reversion.csv", index=False)
         overlap_activity.to_csv(out_dir / f"{condition}_hit_overlap_activity.csv", index=False)
@@ -273,10 +274,10 @@ def run_main(
                 "copairs_allowlist_moa_n_significant_q10": m["n_copairs_moa_sig"],
                 "copairs_allowlist_target_n_significant_q10": m["n_copairs_target_sig"],
                 "n_consistency_called_terms": m["n_consistency_called"],
-                "copairs_cross_rep_activity_jaccard": bm.mean_pairwise_jaccard(overlap_activity, space),
-                "copairs_cross_rep_distinctiveness_jaccard": bm.mean_pairwise_jaccard(overlap_distinctiveness, space),
-                "copairs_cross_rep_allowlist_jaccard": bm.mean_pairwise_jaccard(overlap_active, space),
-                "copairs_cross_rep_consistency_jaccard": bm.mean_pairwise_jaccard(overlap_consistency, space),
+                "copairs_cross_rep_activity_jaccard": cp.mean_pairwise_jaccard(overlap_activity, space),
+                "copairs_cross_rep_distinctiveness_jaccard": cp.mean_pairwise_jaccard(overlap_distinctiveness, space),
+                "copairs_cross_rep_allowlist_jaccard": cp.mean_pairwise_jaccard(overlap_active, space),
+                "copairs_cross_rep_consistency_jaccard": cp.mean_pairwise_jaccard(overlap_consistency, space),
                 "a1_batch_reduction": (
                     a1_metrics[space]["before"]["silhouette_batch"]
                     - a1_metrics[space]["after"]["silhouette_batch"]
@@ -301,7 +302,7 @@ def run_main(
     cross_condition_jaccard = {space: {} for space in feature_spaces}
     for call, by_space in cross_condition_hit_sets.items():
         for space in feature_spaces:
-            overlap = bm.hit_overlap(by_space[space])
+            overlap = cp.hit_overlap(by_space[space])
             overlap.to_csv(out_dir / f"{space}_cross_condition_hit_overlap_{call}.csv", index=False)
             cross_condition_jaccard[space][call] = (
                 float(overlap["jaccard"].mean()) if len(overlap) else float("nan")

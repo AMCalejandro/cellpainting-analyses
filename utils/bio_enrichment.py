@@ -1,6 +1,8 @@
 """Post-hoc biological-plausibility checks on a reversion run's nominees --
-not part of compound selection (see `imaging.reversion`), run afterward on
-its `per_compound` output."""
+not part of compound selection (see `imaging.reversion`/`proteomics.reversion`),
+run afterward on its `per_compound` output. Domain-agnostic, like the rest of
+`utils`: used by both `imaging.benchmark` and the proteomics Tier E figure
+pipeline."""
 
 import gseapy as gp
 import pandas as pd

@@ -49,6 +49,16 @@ from utils import features as feat
 
 DEFAULT_COVARIATES = ("plate",)
 
+# Named covariate combinations `commands.proteomics.copairs_main` sweeps one
+# full copairs run per entry -- the proteomics analogue of
+# `utils.features.COVARIATE_SETS`. There's no per-well cell count here (see
+# module docstring), so unlike imaging's sets these are plate/batch only.
+COVARIATE_SETS = {
+    "plate": ("plate",),
+    "batch": ("batch",),
+    "batch_plate": ("batch", "plate"),
+}
+
 
 def robust_zscore(X: np.ndarray) -> np.ndarray:
     """Median/1.4826*MAD standardization -- same formula as

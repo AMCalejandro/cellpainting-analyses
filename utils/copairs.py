@@ -203,3 +203,96 @@ def compute_consistency(
         cache_dir=cache_dir,
     )
     return _add_normalized_ap(map_df, ap_scores, [groupby], null_size, seed, cache_dir)
+
+
+# --- hit-set agreement + allowlist enrichment ---------------------------
+# Shared by `imaging.benchmark` and the proteomics Tier E figure pipeline --
+# domain-agnostic over hit sets keyed by representation, processed/covariate
+# tag, or condition, so it lives here rather than in either domain package.
+
+
+def jaccard(a: set, b: set) -> float:
+    if not a and not b:
+        return float("nan")
+    return len(a & b) / len(a | b)
+
+
+def hit_overlap(hit_sets: dict) -> pd.DataFrame:
+    """Pairwise Jaccard index of hit sets, one set per key (e.g. one
+    representation, one processed/covariate tag, or one condition)."""
+    names = list(hit_sets)
+    rows = [
+        {"a": a, "b": b, "jaccard": jaccard(hit_sets[a], hit_sets[b])}
+        for i, a in enumerate(names)
+        for b in names[i + 1 :]
+    ]
+    return pd.DataFrame(rows, columns=["a", "b", "jaccard"])
+
+
+def mean_pairwise_jaccard(overlap_df: pd.DataFrame, name: str) -> float:
+    """Mean Jaccard of `name` against every other key in a `hit_overlap`
+    pairwise table -- a single per-key agreement summary pulled from the
+    same table `hit_overlap` already returns, instead of a separate
+    all-vs-one computation. NaN if `name` doesn't appear (e.g. a
+    single-key run)."""
+    rows = overlap_df[(overlap_df["a"] == name) | (overlap_df["b"] == name)]
+    return float(rows["jaccard"].mean()) if len(rows) else float("nan")
+
+
+def consistency_called_terms(consistency_df: pd.DataFrame) -> pd.DataFrame:
+    """The consistency call's own called groups (below_corrected_p), sorted
+    by normalized AP descending -- unlike activity/distinctiveness, a
+    consistency call is already a per-term (Metadata_target or
+    Metadata_moa, whichever `compute_consistency` was grouped by) test, so
+    "which terms are enriched" is just this call's hit list rather than a
+    separate permutation enrichment over a compound pool."""
+    groupby_col = "Metadata_target" if "Metadata_target" in consistency_df.columns else "Metadata_moa"
+    return (
+        consistency_df.loc[consistency_df["below_corrected_p"]]
+        .sort_values("normalized_average_precision", ascending=False)
+        .reset_index(drop=True)
+        .rename(columns={groupby_col: "term"})
+    )
+
+
+def combine_allowlist_ranks(
+    activity_df: pd.DataFrame,
+    distinctiveness_df: pd.DataFrame,
+    score_col: str = "mean_average_precision",
+) -> pd.DataFrame:
+    """Combine an activity call and a distinctiveness call into one ranked
+    table over their shared compound pool (the activity ∩ distinctiveness
+    "allowlist"), feeding a downstream preranked-GSEA enrichment
+    (`utils.bio_enrichment.moa_enrichment`) of the allowlist as a whole.
+
+    Ranked by the per-compound min of the two calls' PERCENTILE RANK on
+    `score_col` -- the continuous relaxation of "both criteria hold" (a
+    compound only ranks as high as its weaker call). Percentile rank, not
+    the raw `score_col` value: activity's and distinctiveness's
+    `mean_average_precision` typically live on very different natural
+    scales (distinctiveness's negative set is the whole treated population
+    vs. activity's same-plate wells, a much harder discrimination task, so
+    its scores sit far closer to 0). A raw `min()` across that scale
+    mismatch just reduces to "whichever call is smaller", almost always
+    distinctiveness, silently discarding the activity signal; ranking each
+    call within its own pool first makes the two comparable before
+    combining.
+
+    Both percentile ranks are drawn from the same size-n grid (both tables
+    score every compound in the pool), so a plain `min()` of the two often
+    collides on ties. GSEA needs a strictly ordered list (ties make its
+    null/leading-edge computation degrade), so the *other* call's
+    percentile is folded in at a scale far below the 1/n grid spacing as a
+    tiebreaker -- it can't reorder any two compounds whose min()s actually
+    differ, only disambiguate exact ties."""
+    df = activity_df.merge(
+        distinctiveness_df[["Metadata_broad_sample", score_col]],
+        on="Metadata_broad_sample",
+        suffixes=("_activity", "_distinctiveness"),
+    )
+    pct_activity = df[f"{score_col}_activity"].rank(pct=True)
+    pct_distinctiveness = df[f"{score_col}_distinctiveness"].rank(pct=True)
+    pct = pd.concat([pct_activity, pct_distinctiveness], axis=1)
+    tiebreak = (pct_activity + pct_distinctiveness) / (2 * (len(df) + 1) ** 2)
+    df[score_col] = pct.min(axis=1) + tiebreak
+    return df
