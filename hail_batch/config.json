@@ -30,7 +30,7 @@
     "preprocess": false
   },
   "proteomics-data-files": {
-    "brd4_all-plates_normalized-nelisa-signal_sample.csv": "gs://nnf-amc/data/cp-imaging-adi/proteomics/brd4_all-plates_normalized-nelisa-signal_sample.csv"
+    "brd4_all-plates_normalized-nelisa-signal_sample.csv": "gs://nnf-amc/project/cp-imaging-adi/data/proteomics/brd4_all-plates_normalized-nelisa-signal_sample.csv"
   },
   "proteomics-output-dir": "gs://nnf-amc/project/cp-imaging-adi/results/proteomics_copairs/",
   "proteomics-pipeline": {
