@@ -246,7 +246,14 @@ def batch_report_main(
                 f"silhouette_condition {metrics['before']['silhouette_condition']:.3f} -> "
                 f"{metrics['after']['silhouette_condition']:.3f}, "
                 f"silhouette_plate {metrics['before']['silhouette_plate']:.3f} -> "
-                f"{metrics['after']['silhouette_plate']:.3f} "
+                f"{metrics['after']['silhouette_plate']:.3f}, "
+                f"silhouette_batch_stratified "
+                f"{metrics['before']['silhouette_batch_stratified']:.3f} -> "
+                f"{metrics['after']['silhouette_batch_stratified']:.3f}, "
+                f"kbet_rejection_rate {metrics['before']['kbet_rejection_rate']:.3f} -> "
+                f"{metrics['after']['kbet_rejection_rate']:.3f}, "
+                f"ilisi {metrics['before']['ilisi']:.3f} -> {metrics['after']['ilisi']:.3f}, "
+                f"clisi {metrics['before']['clisi']:.3f} -> {metrics['after']['clisi']:.3f} "
                 f"in {time.time() - t0:.1f}s",
                 flush=True,
             )
@@ -254,6 +261,10 @@ def batch_report_main(
         metrics_by_space, out_dir, ridge_sets, extra_methods
     )
     print(f"Saved covariate-set comparison figure -> {comparison_path}", flush=True)
+    local_mixing_path = plot.make_local_mixing_comparison_figure(
+        metrics_by_space, out_dir, ridge_sets, extra_methods
+    )
+    print(f"Saved local-mixing comparison figure -> {local_mixing_path}", flush=True)
 
 
 def add_batch_report_parser(parser: argparse.ArgumentParser) -> None:
