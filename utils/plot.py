@@ -22,6 +22,14 @@ across driver modules.
   makes it visually obvious when adding plate over-corrects (condition
   silhouette drops below zero alongside batch silhouette, instead of batch
   dropping while condition is preserved).
+- `make_local_mixing_comparison_figure`: companion to
+  `make_covariate_comparison_figure` -- two rows (silhouette-scale metrics;
+  0-1-scale local-mixing metrics) x one column per feature space, across
+  covariate sets. Plots `silhouette_batch_stratified`/`silhouette_condition`
+  and kBET acceptance/`ilisi` (imaging.batch_report), which stay sensitive
+  to local batch sub-clustering that a pooled `silhouette_batch` can miss
+  when a feature space separates biological conditions strongly (see
+  imaging.batch_report's module docstring).
 - `make_tier_a_figure` / `make_tier_b_figure` / `make_tier_c_figure` /
   `make_tier_d_figure` / `make_tier_e_figure`: one figure per tier of
   experiments/benchmark_feature_representation.md, for
@@ -565,6 +573,109 @@ def make_covariate_comparison_figure(
     fig.tight_layout()
 
     out_path = out_dir / "covariate_set_comparison.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def make_local_mixing_comparison_figure(
+    metrics_by_space: dict,
+    out_dir: Path,
+    covariate_sets: list,
+    extra_methods: list = (),
+) -> Path:
+    """Companion to `make_covariate_comparison_figure`: post-residualization
+    local-mixing metrics (imaging.batch_report) across `covariate_sets`, one
+    column per feature space, covariate sets whose name contains "plate"
+    shaded (same convention as the sibling figure).
+
+    Two rows, kept on separate axes because the metrics don't share a
+    scale:
+    - top: `silhouette_batch_stratified` and `silhouette_condition`
+      (silhouette scale, [-1, 1]) -- the condition-stratified counterpart
+      to `make_covariate_comparison_figure`'s pooled `silhouette_batch`,
+      immune to a large between-condition gap masking local batch
+      sub-clustering.
+    - bottom: kBET acceptance rate (`1 - kbet_rejection_rate`) and `ilisi`
+      (both [0, 1], higher = better mixed) -- single-cell metrics computed
+      from each point's nearest neighbors only.
+
+    A method that pushes stratified batch silhouette down *and* condition
+    silhouette down (top row), or kBET/iLISI up while `clisi` (not plotted
+    here, see the saved metrics JSON) also rises, washed out real
+    condition signal along with batch noise rather than cleanly removing
+    batch.
+    """
+    methods = list(covariate_sets) + list(extra_methods)
+    feature_spaces = list(metrics_by_space)
+    fig, axes = plt.subplots(
+        2, len(feature_spaces), figsize=(5 * len(feature_spaces), 9),
+        sharex=True, sharey="row",
+    )
+    axes = np.atleast_2d(axes)
+    if axes.shape[0] == 1:
+        axes = axes.reshape(2, -1)
+    x = np.arange(len(methods))
+
+    for col, space in enumerate(feature_spaces):
+        metrics = metrics_by_space[space]
+        strat_batch = [metrics[m]["after"]["silhouette_batch_stratified"] for m in methods]
+        cond_after = [metrics[m]["after"]["silhouette_condition"] for m in methods]
+        kbet_accept = [1.0 - metrics[m]["after"]["kbet_rejection_rate"] for m in methods]
+        ilisi_after = [metrics[m]["after"]["ilisi"] for m in methods]
+
+        top, bottom = axes[0, col], axes[1, col]
+        for ax in (top, bottom):
+            for i, cov_key in enumerate(covariate_sets):
+                if "plate" in cov_key:
+                    ax.axvspan(i - 0.5, i + 0.5, color="#f4b6b6", alpha=0.4, zorder=0)
+            if extra_methods:
+                ax.axvline(len(covariate_sets) - 0.5, color="black", linestyle=":", linewidth=1)
+
+        top.axhline(0, color="gray", linestyle="--", linewidth=0.8, zorder=1)
+        top.plot(
+            x, strat_batch, marker="o", color="#1f77b4",
+            label="silhouette_batch_stratified (after)",
+        )
+        top.plot(
+            x, cond_after, marker="o", color="#d62728",
+            label="silhouette_condition (after)",
+        )
+        top.set_title(space)
+
+        bottom.set_ylim(-0.05, 1.05)
+        bottom.plot(
+            x, kbet_accept, marker="s", color="#9467bd",
+            label="kBET acceptance rate (after)",
+        )
+        bottom.plot(
+            x, ilisi_after, marker="^", color="#ff7f0e", linestyle="--",
+            label="iLISI (after)",
+        )
+        bottom.set_xticks(x)
+        bottom.set_xticklabels(methods, rotation=30, ha="right")
+        bottom.set_xlim(-0.5, len(methods) - 0.5)
+
+    axes[0, 0].set_ylabel("Silhouette score (after residualization)")
+    axes[1, 0].set_ylabel("Local mixing score (after residualization)")
+
+    top_handles, top_labels = axes[0, 0].get_legend_handles_labels()
+    bottom_handles, bottom_labels = axes[1, 0].get_legend_handles_labels()
+    handles = top_handles + bottom_handles
+    labels = top_labels + bottom_labels
+    handles.append(plt.Rectangle((0, 0), 1, 1, color="#f4b6b6", alpha=0.4))
+    labels.append("covariate set includes plate")
+    fig.legend(
+        handles, labels, loc="upper center", ncol=3, bbox_to_anchor=(0.5, 1.04), frameon=False
+    )
+    fig.suptitle(
+        "Local-neighborhood mixing by method -- immune to a large\n"
+        "between-condition gap masking local batch sub-clustering",
+        fontsize=12, y=1.1,
+    )
+    fig.tight_layout()
+
+    out_path = out_dir / "local_mixing_comparison.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return out_path
