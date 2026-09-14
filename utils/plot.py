@@ -6,15 +6,31 @@ across driver modules.
   pipeline outputs saved by run_pipeline.py -- a 3x2 grid of (activity,
   distinctiveness, consistency) x (call-count bars, nMAP violins), one group
   of covariate-set bars/violins per feature space.
+- `make_copairs_cross_condition_figure`: cross-condition companion to
+  `make_copairs_summary_figure` -- ONE figure spanning every condition, for
+  a single (the "best") covariate set, feature spaces on the x-axis and
+  conditions as the grouped/colored bars.
+- `make_copairs_feature_space_figure`: the mirror image -- ONE figure
+  spanning every condition, for a single feature space, conditions on the
+  x-axis and covariate sets as the grouped/colored bars.
 - `make_proteomics_copairs_summary_figure`: `run_proteomics_copairs.py`'s
   analogue of `make_copairs_summary_figure` for the single-feature-space
   proteomics pipeline.
 - `make_batch_report_figures`: PCA/UMAP 2x2 grids (before/after
   residualization x colored-by-batch/colored-by-condition) for
   imaging.batch_report.
+- `make_batch_effect_pca_figure`: single-PCA-fit, 3-panel snapshot (colored
+  by cell count/plate/batch) of the batch effects present in the raw,
+  pre-residualization feature space -- one per feature space, independent
+  of residualization method, for imaging.batch_report.
 - `make_reversion_diagnostic_figures`: same PCA/UMAP 2x2 grids, for one
   imaging.reversion.load_joint_residualized run (a single Baseline+stress
   joint space) -- a thin wrapper that subsamples then delegates to
+  `make_batch_report_figures`.
+- `make_copairs_pc_figure`: same PCA/UMAP 2x2 grids again, for one
+  commands.imaging.copairs_main (feature_space, covariate_set) run --
+  colored by batch/plate instead of batch/condition, since copairs runs a
+  single condition at a time. Also a thin wrapper over
   `make_batch_report_figures`.
 - `make_covariate_comparison_figure`: one panel per feature space plotting
   post-residualization silhouette_batch/silhouette_condition/silhouette_plate
@@ -30,6 +46,11 @@ across driver modules.
   to local batch sub-clustering that a pooled `silhouette_batch` can miss
   when a feature space separates biological conditions strongly (see
   imaging.batch_report's module docstring).
+- `make_feature_space_comparison_figures`: one figure per feature space,
+  combining `make_covariate_comparison_figure`'s panel (left) with
+  `make_local_mixing_comparison_figure`'s two panels (right, stacked) for
+  that space -- no plate-shading/legend/descriptive suptitle, since only one
+  feature space's covariate-set axis is shown per figure.
 - `make_tier_a_figure` / `make_tier_b_figure` / `make_tier_c_figure` /
   `make_tier_d_figure` / `make_tier_e_figure`: one figure per tier of
   experiments/benchmark_feature_representation.md, for
@@ -77,6 +98,32 @@ REPRESENTATION_COLORS = {
     "CPCNN": "#eb6834",  # orange
     "UniDino": "#1baf7a",  # aqua
 }
+
+# Shared text sizes, used both by the PCA/UMAP diagnostic panels
+# (_categorical_panel, _continuous_panel, _scatter_grid,
+# make_batch_effect_pca_figure) and by the copairs call-count/nMAP summary
+# figures below (make_copairs_summary_figure, _draw_copairs_calls_grid,
+# make_proteomics_copairs_summary_figure) -- kept as named constants, rather
+# than inlined magic numbers, so every figure in the imaging/proteomics
+# pipelines stays legible and consistent with each other when tuned.
+PANEL_TITLE_FONTSIZE = 13
+AXIS_LABEL_FONTSIZE = 12
+TICK_LABEL_FONTSIZE = 11
+LEGEND_FONTSIZE = 10
+SUPTITLE_FONTSIZE = 17
+
+# Suptitle/legend vertical placement for the copairs summary figures (all
+# figsize=(20, 13)): both sit just above the tight_layout-reserved band
+# (GRID_TOP) instead of floating well above the figure's y=1.0 edge, which
+# is what created a large dead-space gap between the legend/title block and
+# the subplots below it. `fig.tight_layout(rect=[...])` must be called
+# BEFORE `fig.legend`/`fig.suptitle` are added -- tight_layout also reserves
+# extra room to avoid overlapping any figure-level artists already present,
+# so adding the legend/suptitle first (as a naive reading of "legend then
+# tight_layout" suggests) silently re-introduces a big gap above GRID_TOP.
+SUPTITLE_Y = 1.0
+LEGEND_Y = 0.93
+GRID_TOP = 0.9
 
 COV_LABELS = {
     "count": "Count",
@@ -194,8 +241,9 @@ def make_copairs_summary_figure(
 
         ax_bar.set_xticks(range(len(feature_spaces)))
         ax_bar.set_xticklabels(feature_spaces)
-        ax_bar.set_title(f"{title}\n{subtitle.format(condition=condition)}", fontsize=12)
-        ax_bar.set_ylabel(f"{unit} called out of {n_total:,}")
+        ax_bar.set_title(f"{title}\n{subtitle.format(condition=condition)}", fontsize=PANEL_TITLE_FONTSIZE)
+        ax_bar.set_ylabel(f"Significant {unit.lower()} (of {n_total:,})", fontsize=AXIS_LABEL_FONTSIZE)
+        ax_bar.tick_params(labelsize=TICK_LABEL_FONTSIZE)
 
         parts = ax_violin.violinplot(
             violin_data, positions=violin_positions, widths=bar_width * 0.9,
@@ -210,8 +258,13 @@ def make_copairs_summary_figure(
         ax_violin.axhline(0, color="gray", linestyle="--", linewidth=0.8)
         ax_violin.set_xticks(range(len(feature_spaces)))
         ax_violin.set_xticklabels(feature_spaces)
-        ax_violin.set_ylabel(f"{unit[:-1]} nMAP" if unit.endswith("s") else "nMAP")
+        ax_violin.set_ylabel(
+            f"{unit[:-1]} nMAP" if unit.endswith("s") else "nMAP", fontsize=AXIS_LABEL_FONTSIZE
+        )
         ax_violin.set_ylim(-0.25, 1.05)
+        ax_violin.tick_params(labelsize=TICK_LABEL_FONTSIZE)
+
+    fig.tight_layout(rect=[0, 0, 1, GRID_TOP])
 
     handles = [
         plt.Rectangle((0, 0), 1, 1, color=COV_COLORS[k]) for k in covariate_sets
@@ -222,20 +275,234 @@ def make_copairs_summary_figure(
         title="Variables in the Ridge model",
         loc="upper center",
         ncol=len(covariate_sets),
-        bbox_to_anchor=(0.5, 1.02),
+        bbox_to_anchor=(0.5, LEGEND_Y),
         frameon=False,
+        fontsize=LEGEND_FONTSIZE,
+        title_fontsize=LEGEND_FONTSIZE,
     )
     fig.suptitle(
-        "Plate residualization changes call counts and mean normalized AP\n"
-        f"(reproduction from cpg0014 {condition} data)",
-        fontsize=16,
-        y=1.08,
+        "Plate residualization changes the number of statistically significant hits,\n"
+        f"and mean normalized AP (reproduction from cpg0014 {condition} data)",
+        fontsize=SUPTITLE_FONTSIZE,
+        y=SUPTITLE_Y,
     )
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
 
     figures_dir = out_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
     out_path = figures_dir / f"reproduced_figure{condition_tag}{consistency_tag}.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def _draw_copairs_calls_grid(
+    axes: np.ndarray,
+    calls: list,
+    results: dict,
+    groups: list,
+    hues: list,
+    hue_colors: dict,
+    group_labels: Optional[list] = None,
+) -> None:
+    """Shared call-count-bar/nMAP-violin drawing for
+    `make_copairs_cross_condition_figure` and
+    `make_copairs_feature_space_figure`: `results` maps
+    `(group, hue, call_name) -> result dataframe`. `groups` are the x-axis
+    tick groups and `hues` are the grouped/colored bars within each group --
+    the same 3-column-of-(count-bar, nMAP-violin) layout as
+    `make_copairs_summary_figure`, just parameterized over which axis plays
+    the group/hue role (that function keeps its own inlined copy rather than
+    calling this, since feature_space/covariate_set are always its
+    group/hue -- this helper only exists for the two figures that need that
+    swapped or fixed)."""
+    group_labels = group_labels if group_labels is not None else [str(g) for g in groups]
+    for col, (call_name, title, subtitle, unit) in enumerate(calls):
+        ax_bar, ax_violin = axes[0, col], axes[1, col]
+        n_total = len(results[(groups[0], hues[0], call_name)])
+
+        group_width = 0.8
+        n_hues = len(hues)
+        bar_width = group_width / n_hues
+        violin_positions, violin_data, violin_colors = [], [], []
+
+        for group_ix, group in enumerate(groups):
+            for hue_ix, hue in enumerate(hues):
+                df = results[(group, hue, call_name)]
+                n_calls = int(df["below_corrected_p"].sum())
+                x = group_ix + (hue_ix - (n_hues - 1) / 2) * bar_width
+                ax_bar.bar(x, n_calls, width=bar_width * 0.95, color=hue_colors[hue])
+                ax_bar.text(x, n_calls, str(n_calls), ha="center", va="bottom", fontsize=9)
+
+                nmap = df["normalized_average_precision"].dropna().to_numpy()
+                violin_positions.append(x)
+                violin_data.append(nmap if len(nmap) > 0 else np.array([0.0]))
+                violin_colors.append(hue_colors[hue])
+
+        ax_bar.set_xticks(range(len(groups)))
+        ax_bar.set_xticklabels(group_labels)
+        ax_bar.set_title(f"{title}\n{subtitle}", fontsize=PANEL_TITLE_FONTSIZE)
+        ax_bar.set_ylabel(f"Significant {unit.lower()} (of {n_total:,})", fontsize=AXIS_LABEL_FONTSIZE)
+        ax_bar.tick_params(labelsize=TICK_LABEL_FONTSIZE)
+
+        parts = ax_violin.violinplot(
+            violin_data, positions=violin_positions, widths=bar_width * 0.9,
+            showmedians=True, showextrema=False,
+        )
+        for body, color in zip(parts["bodies"], violin_colors):
+            body.set_facecolor(color)
+            body.set_edgecolor("none")
+            body.set_alpha(0.9)
+        parts["cmedians"].set_color("black")
+
+        ax_violin.axhline(0, color="gray", linestyle="--", linewidth=0.8)
+        ax_violin.set_xticks(range(len(groups)))
+        ax_violin.set_xticklabels(group_labels)
+        ax_violin.set_ylabel(
+            f"{unit[:-1]} nMAP" if unit.endswith("s") else "nMAP", fontsize=AXIS_LABEL_FONTSIZE
+        )
+        ax_violin.set_ylim(-0.25, 1.05)
+        ax_violin.tick_params(labelsize=TICK_LABEL_FONTSIZE)
+
+
+def _copairs_calls(consistency_groupby: str) -> list:
+    """`CALLS`, with the consistency title/unit swapped per
+    `CONSISTENCY_GROUPBY_LABELS` and the distinctiveness subtitle's
+    `{condition}` slot filled with `PROTEOMICS_CALL_SUBTITLE_OVERRIDES`'s
+    condition-agnostic phrasing -- shared by the two multi-condition
+    figures below, neither of which has a single `condition` to fill that
+    slot with (unlike `make_copairs_summary_figure`)."""
+    return [
+        (call_name, title, *CONSISTENCY_GROUPBY_LABELS.get(consistency_groupby, (subtitle, unit)))
+        if call_name == "consistency"
+        else (call_name, title, PROTEOMICS_CALL_SUBTITLE_OVERRIDES.get(call_name, subtitle), unit)
+        for call_name, title, subtitle, unit in CALLS
+    ]
+
+
+def make_copairs_cross_condition_figure(
+    out_dirs: dict,
+    feature_spaces: list,
+    covariate_set: str,
+    save_dir: Path,
+    consistency_groupby: str = DEFAULT_CONSISTENCY_GROUPBY,
+) -> Path:
+    """Cross-condition companion to `make_copairs_summary_figure`: ONE
+    figure covering every condition in `out_dirs` (`{condition: out_dir}` --
+    each condition's copairs run lives in its own `out_dir`, e.g.
+    results/imaging/copairs_v2/processed/<condition>/, since
+    `commands.imaging.copairs_main` runs one condition at a time), fixed to
+    a single `covariate_set` (pass the "best" residualization method, e.g.
+    "count_batch_plate") so the comparison isolates the condition-to-condition
+    axis instead of also varying by covariate set. Feature spaces are the
+    x-axis groups (as in `make_copairs_summary_figure`) and conditions are
+    the grouped/colored bars within each group.
+
+    Reads each condition's already-computed parquets under
+    `out_dirs[condition] / "parquet"` -- does not re-run copairs. Saved to
+    `save_dir/reproduced_figure_all_conditions_<covariate_set>.png`."""
+    conditions = list(out_dirs)
+    consistency_tag = "" if consistency_groupby == DEFAULT_CONSISTENCY_GROUPBY else "_moa"
+    call_tags = {"consistency": consistency_tag}
+    calls = _copairs_calls(consistency_groupby)
+
+    results = {}
+    for condition in conditions:
+        condition_tag = "" if condition == "FFA" else f"_{condition}"
+        for space in feature_spaces:
+            for call_name, *_ in CALLS:
+                tag = call_tags.get(call_name, "")
+                path = (
+                    out_dirs[condition] / "parquet"
+                    / f"{space}{condition_tag}_{covariate_set}_{call_name}{tag}.parquet"
+                )
+                results[(space, condition, call_name)] = pd.read_parquet(path)
+
+    palette = plt.get_cmap("tab10").colors
+    condition_colors = {c: palette[i % len(palette)] for i, c in enumerate(conditions)}
+
+    fig, axes = plt.subplots(2, len(calls), figsize=(20, 13))
+    _draw_copairs_calls_grid(
+        axes, calls, results, feature_spaces, conditions, condition_colors,
+        group_labels=feature_spaces,
+    )
+
+    fig.tight_layout(rect=[0, 0, 1, GRID_TOP])
+
+    handles = [plt.Rectangle((0, 0), 1, 1, color=condition_colors[c]) for c in conditions]
+    fig.legend(
+        handles, conditions, title="Condition", loc="upper center",
+        ncol=len(conditions), bbox_to_anchor=(0.5, LEGEND_Y), frameon=False,
+        fontsize=LEGEND_FONTSIZE, title_fontsize=LEGEND_FONTSIZE,
+    )
+    fig.suptitle(
+        "Statistically significant hits and mean normalized AP across conditions\n"
+        f"({COV_LABELS[covariate_set]} residualization, all feature spaces)",
+        fontsize=SUPTITLE_FONTSIZE, y=SUPTITLE_Y,
+    )
+
+    save_dir.mkdir(parents=True, exist_ok=True)
+    out_path = save_dir / f"reproduced_figure_all_conditions_{covariate_set}.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
+def make_copairs_feature_space_figure(
+    out_dirs: dict,
+    feature_space: str,
+    covariate_sets: list,
+    save_dir: Path,
+    consistency_groupby: str = DEFAULT_CONSISTENCY_GROUPBY,
+) -> Path:
+    """Single-feature-space companion to `make_copairs_summary_figure`: ONE
+    figure covering every condition in `out_dirs` (`{condition: out_dir}`)
+    for one `feature_space` (e.g. "CellProfiler"), with conditions as the
+    x-axis groups and Ridge covariate sets as the grouped/colored bars
+    within each group -- the mirror image of
+    `make_copairs_cross_condition_figure` (which fixes the covariate set
+    and varies feature space instead).
+
+    Reads each condition's already-computed parquets under
+    `out_dirs[condition] / "parquet"` -- does not re-run copairs. Saved to
+    `save_dir/reproduced_figure_<feature_space>_all_conditions.png`."""
+    conditions = list(out_dirs)
+    consistency_tag = "" if consistency_groupby == DEFAULT_CONSISTENCY_GROUPBY else "_moa"
+    call_tags = {"consistency": consistency_tag}
+    calls = _copairs_calls(consistency_groupby)
+
+    results = {}
+    for condition in conditions:
+        condition_tag = "" if condition == "FFA" else f"_{condition}"
+        for cov_key in covariate_sets:
+            for call_name, *_ in CALLS:
+                tag = call_tags.get(call_name, "")
+                path = (
+                    out_dirs[condition] / "parquet"
+                    / f"{feature_space}{condition_tag}_{cov_key}_{call_name}{tag}.parquet"
+                )
+                results[(condition, cov_key, call_name)] = pd.read_parquet(path)
+
+    fig, axes = plt.subplots(2, len(calls), figsize=(20, 13))
+    _draw_copairs_calls_grid(
+        axes, calls, results, conditions, covariate_sets, COV_COLORS, group_labels=conditions,
+    )
+
+    fig.tight_layout(rect=[0, 0, 1, GRID_TOP])
+
+    handles = [plt.Rectangle((0, 0), 1, 1, color=COV_COLORS[k]) for k in covariate_sets]
+    fig.legend(
+        handles, [COV_LABELS[k] for k in covariate_sets], title="Variables in the Ridge model",
+        loc="upper center", ncol=len(covariate_sets), bbox_to_anchor=(0.5, LEGEND_Y), frameon=False,
+        fontsize=LEGEND_FONTSIZE, title_fontsize=LEGEND_FONTSIZE,
+    )
+    fig.suptitle(
+        f"{feature_space}: statistically significant hits and mean normalized AP\n"
+        "across conditions and Ridge covariate sets",
+        fontsize=SUPTITLE_FONTSIZE, y=SUPTITLE_Y,
+    )
+
+    save_dir.mkdir(parents=True, exist_ok=True)
+    out_path = save_dir / f"reproduced_figure_{feature_space}_all_conditions.png"
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return out_path
@@ -318,8 +585,9 @@ def make_proteomics_copairs_summary_figure(
         ax_bar.set_xticklabels(
             [f"{c}\n(out of {n:,})" for c, n in zip(conditions, n_per_condition)]
         )
-        ax_bar.set_title(f"{title}\n{subtitle}", fontsize=12)
-        ax_bar.set_ylabel(f"{unit} called")
+        ax_bar.set_title(f"{title}\n{subtitle}", fontsize=PANEL_TITLE_FONTSIZE)
+        ax_bar.set_ylabel(f"Significant {unit.lower()}", fontsize=AXIS_LABEL_FONTSIZE)
+        ax_bar.tick_params(labelsize=TICK_LABEL_FONTSIZE)
 
         parts = ax_violin.violinplot(
             violin_data, positions=violin_positions, widths=bar_width * 0.9,
@@ -334,8 +602,13 @@ def make_proteomics_copairs_summary_figure(
         ax_violin.axhline(0, color="gray", linestyle="--", linewidth=0.8)
         ax_violin.set_xticks(range(len(conditions)))
         ax_violin.set_xticklabels(conditions)
-        ax_violin.set_ylabel(f"{unit[:-1]} nMAP" if unit.endswith("s") else "nMAP")
+        ax_violin.set_ylabel(
+            f"{unit[:-1]} nMAP" if unit.endswith("s") else "nMAP", fontsize=AXIS_LABEL_FONTSIZE
+        )
         ax_violin.set_ylim(-0.25, 1.05)
+        ax_violin.tick_params(labelsize=TICK_LABEL_FONTSIZE)
+
+    fig.tight_layout(rect=[0, 0, 1, GRID_TOP])
 
     handles = [
         plt.Rectangle((0, 0), 1, 1, color=tag_colors[t]) for t in processed_tags
@@ -346,16 +619,17 @@ def make_proteomics_copairs_summary_figure(
         title="Processed state",
         loc="upper center",
         ncol=len(processed_tags),
-        bbox_to_anchor=(0.5, 1.02),
+        bbox_to_anchor=(0.5, LEGEND_Y),
         frameon=False,
+        fontsize=LEGEND_FONTSIZE,
+        title_fontsize=LEGEND_FONTSIZE,
     )
     fig.suptitle(
-        "Batch/plate correction changes call counts and mean normalized AP\n"
-        "(proteomics copairs)",
-        fontsize=16,
-        y=1.08,
+        "Batch/plate correction changes the number of statistically significant hits,\n"
+        "and mean normalized AP (proteomics copairs)",
+        fontsize=SUPTITLE_FONTSIZE,
+        y=SUPTITLE_Y,
     )
-    fig.tight_layout(rect=[0, 0, 1, 0.93])
 
     figures_dir = out_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
@@ -363,6 +637,53 @@ def make_proteomics_copairs_summary_figure(
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return out_path
+
+
+
+
+def _categorical_panel(
+    ax, coords: np.ndarray, labels: pd.Series, title: str, xlabel: str, ylabel: str
+) -> None:
+    """Scatter `coords` colored by a categorical `labels` series (tab20 up
+    to 20 categories, else viridis), with a legend when there are few
+    enough categories to fit one legibly."""
+    categories = labels.astype("category")
+    codes = categories.cat.codes.to_numpy()
+    n_cat = max(len(categories.cat.categories), 1)
+    cmap = plt.get_cmap("tab20" if n_cat <= 20 else "viridis")
+    ax.scatter(
+        coords[:, 0], coords[:, 1], c=codes, cmap=cmap, s=6, alpha=0.7,
+        vmin=0, vmax=max(n_cat - 1, 1),
+    )
+    ax.set_title(title, fontsize=PANEL_TITLE_FONTSIZE)
+    ax.set_xlabel(xlabel, fontsize=AXIS_LABEL_FONTSIZE)
+    ax.set_ylabel(ylabel, fontsize=AXIS_LABEL_FONTSIZE)
+    ax.tick_params(labelsize=TICK_LABEL_FONTSIZE)
+    if n_cat <= 12:
+        handles = [
+            plt.Line2D(
+                [], [], marker="o", linestyle="",
+                color=cmap(i / max(n_cat - 1, 1)), label=str(cat),
+            )
+            for i, cat in enumerate(categories.cat.categories)
+        ]
+        ax.legend(handles=handles, fontsize=LEGEND_FONTSIZE, loc="best")
+
+
+def _continuous_panel(
+    fig: plt.Figure, ax, coords: np.ndarray, values: np.ndarray,
+    title: str, xlabel: str, ylabel: str, cmap: str = "viridis",
+) -> None:
+    """Scatter `coords` colored by a continuous `values` array, with a
+    colorbar -- the continuous-covariate counterpart to `_categorical_panel`
+    (e.g. cell count, where a discrete legend doesn't make sense)."""
+    sc = ax.scatter(coords[:, 0], coords[:, 1], c=values, cmap=cmap, s=6, alpha=0.7)
+    ax.set_title(title, fontsize=PANEL_TITLE_FONTSIZE)
+    ax.set_xlabel(xlabel, fontsize=AXIS_LABEL_FONTSIZE)
+    ax.set_ylabel(ylabel, fontsize=AXIS_LABEL_FONTSIZE)
+    ax.tick_params(labelsize=TICK_LABEL_FONTSIZE)
+    cbar = fig.colorbar(sc, ax=ax, fraction=0.046, pad=0.04)
+    cbar.ax.tick_params(labelsize=TICK_LABEL_FONTSIZE)
 
 
 def _scatter_grid(
@@ -387,28 +708,10 @@ def _scatter_grid(
     for r, (row_label, coords) in enumerate(rows):
         xlabel, ylabel = axis_labels[r] if axis_labels is not None else ("Dim 1", "Dim 2")
         for c, col in enumerate(cols):
-            ax = axes[r, c]
-            categories = meta[col].astype("category")
-            codes = categories.cat.codes.to_numpy()
-            n_cat = max(len(categories.cat.categories), 1)
-            cmap = plt.get_cmap("tab20" if n_cat <= 20 else "viridis")
-            ax.scatter(
-                coords[:, 0], coords[:, 1], c=codes, cmap=cmap, s=6, alpha=0.7,
-                vmin=0, vmax=max(n_cat - 1, 1),
+            _categorical_panel(
+                axes[r, c], coords, meta[col], f"{row_label}\ncolored by {col}", xlabel, ylabel
             )
-            ax.set_title(f"{row_label}\ncolored by {col}", fontsize=10)
-            ax.set_xlabel(xlabel)
-            ax.set_ylabel(ylabel)
-            if n_cat <= 12:
-                handles = [
-                    plt.Line2D(
-                        [], [], marker="o", linestyle="",
-                        color=cmap(i / max(n_cat - 1, 1)), label=str(cat),
-                    )
-                    for i, cat in enumerate(categories.cat.categories)
-                ]
-                ax.legend(handles=handles, fontsize=7, loc="best")
-    fig.suptitle(title, fontsize=13)
+    fig.suptitle(title, fontsize=SUPTITLE_FONTSIZE)
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     return fig
 
@@ -458,6 +761,48 @@ def make_batch_report_figures(
         print("umap-learn not installed; skipping UMAP plot", flush=True)
 
 
+def make_batch_effect_pca_figure(
+    feats: np.ndarray,
+    meta: pd.DataFrame,
+    out_dir: Path,
+    file_stub: str,
+    title_prefix: str,
+    count_col: str = "Metadata_cell_count",
+    plate_col: str = "Metadata_Plate",
+    batch_col: str = "Metadata_batch",
+    seed: int = 0,
+) -> Path:
+    """Single-PCA-fit, 3-panel snapshot of the batch effects already
+    present in `feats` (raw, pre-residualization) -- colored by cell count
+    (continuous), plate, and batch. Unlike `make_batch_report_figures`'
+    before/after grid, this doesn't depend on a residualization method, so
+    callers compute it once per feature space rather than once per
+    (feature_space, method) pair."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    pca_model = PCA(n_components=2, random_state=seed).fit(feats)
+    coords = pca_model.transform(feats)
+    var = pca_model.explained_variance_ratio_
+    xlabel, ylabel = f"PC1 ({var[0]:.1%} var)", f"PC2 ({var[1]:.1%} var)"
+
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    _continuous_panel(
+        fig, axes[0], coords, meta[count_col].to_numpy(dtype=float),
+        f"Colored by {count_col}", xlabel, ylabel,
+    )
+    _categorical_panel(axes[1], coords, meta[plate_col], f"Colored by {plate_col}", xlabel, ylabel)
+    _categorical_panel(axes[2], coords, meta[batch_col], f"Colored by {batch_col}", xlabel, ylabel)
+    fig.suptitle(
+        f"{title_prefix} -- PCA batch-effect snapshot (raw features)",
+        fontsize=SUPTITLE_FONTSIZE,
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.93])
+
+    out_path = out_dir / f"{file_stub}_pca.png"
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    return out_path
+
+
 REVERSION_FIGURE_SAMPLE_SIZE = 5000
 
 
@@ -504,6 +849,46 @@ def make_reversion_diagnostic_figures(
         title_prefix,
         batch_col=batch_col,
         condition_col=condition_col,
+        seed=seed,
+    )
+
+
+def make_copairs_pc_figure(
+    feats_before: np.ndarray,
+    feats_after: np.ndarray,
+    meta: pd.DataFrame,
+    out_dir: Path,
+    file_stub: str,
+    title_prefix: str,
+    batch_col: str = "Metadata_batch",
+    plate_col: str = "Metadata_Plate",
+    sample_size: Optional[int] = REVERSION_FIGURE_SAMPLE_SIZE,
+    seed: int = 0,
+) -> None:
+    """PCA before-vs-after-residualization diagnostic for one
+    `imaging.commands.copairs_main` (feature_space, covariate_set) run:
+    does residualization remove batch structure? `commands.imaging.copairs_main`
+    runs a single Metadata_condition at a time, so unlike
+    `make_reversion_diagnostic_figures` (jointly loaded Baseline+stress,
+    colored by batch/condition) there's no condition contrast to show here
+    -- the second column is colored by `plate_col` instead, since that's
+    the unit every Ridge covariate set actually corrects (see
+    `imaging.batch_report`'s silhouette_plate). Subsamples to
+    `sample_size` rows first, same convention as
+    `make_reversion_diagnostic_figures`, and delegates to
+    `make_batch_report_figures` for the actual 2x2 PCA/UMAP grids."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    idx = _subsample_index(len(feats_before), sample_size, seed)
+    meta_sample = meta.iloc[idx].reset_index(drop=True)
+    make_batch_report_figures(
+        feats_before[idx],
+        feats_after[idx],
+        meta_sample,
+        out_dir,
+        file_stub,
+        title_prefix,
+        batch_col=batch_col,
+        condition_col=plate_col,
         seed=seed,
     )
 
@@ -679,6 +1064,98 @@ def make_local_mixing_comparison_figure(
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     return out_path
+
+
+def make_feature_space_comparison_figures(
+    metrics_by_space: dict,
+    out_dir: Path,
+    covariate_sets: list,
+    extra_methods: list = (),
+) -> list:
+    """One figure per feature space, combining that space's panel from
+    `make_covariate_comparison_figure` (left) with its two panels from
+    `make_local_mixing_comparison_figure` (right, stacked) -- lets a single
+    feature space's full metric set be viewed without the other spaces'
+    panels crowding the figure. Unlike the two sibling comparison figures,
+    this drops the "covariate set includes plate" shading/legend entry and
+    the descriptive suptitle, since only one covariate-set axis is shown per
+    figure and that context isn't needed here.
+    """
+    methods = list(covariate_sets) + list(extra_methods)
+    x = np.arange(len(methods))
+    out_paths = []
+
+    for space, metrics in metrics_by_space.items():
+        batch_after = [metrics[m]["after"]["silhouette_batch"] for m in methods]
+        cond_after = [metrics[m]["after"]["silhouette_condition"] for m in methods]
+        plate_after = [metrics[m]["after"]["silhouette_plate"] for m in methods]
+        strat_batch = [metrics[m]["after"]["silhouette_batch_stratified"] for m in methods]
+        kbet_accept = [1.0 - metrics[m]["after"]["kbet_rejection_rate"] for m in methods]
+        ilisi_after = [metrics[m]["after"]["ilisi"] for m in methods]
+
+        fig = plt.figure(figsize=(14, 9))
+        gs = fig.add_gridspec(2, 2, width_ratios=[1, 1])
+        left = fig.add_subplot(gs[:, 0])
+        top_right = fig.add_subplot(gs[0, 1])
+        bottom_right = fig.add_subplot(gs[1, 1], sharex=top_right)
+
+        for ax in (left, top_right):
+            if extra_methods:
+                ax.axvline(len(covariate_sets) - 0.5, color="black", linestyle=":", linewidth=1)
+        if extra_methods:
+            bottom_right.axvline(
+                len(covariate_sets) - 0.5, color="black", linestyle=":", linewidth=1
+            )
+
+        left.axhline(0, color="gray", linestyle="--", linewidth=0.8, zorder=1)
+        left.plot(x, batch_after, marker="o", color="#1f77b4", label="silhouette_batch")
+        left.plot(x, cond_after, marker="o", color="#d62728", label="silhouette_condition")
+        left.plot(
+            x, plate_after, marker="^", color="#2ca02c", linestyle="--",
+            label="silhouette_plate",
+        )
+        left.set_xticks(x)
+        left.set_xticklabels(methods, rotation=30, ha="right")
+        left.set_xlim(-0.5, len(methods) - 0.5)
+        left.set_ylabel("Silhouette score (after residualization)")
+        left.set_title("Covariate-set comparison")
+        left.legend(frameon=False)
+
+        top_right.axhline(0, color="gray", linestyle="--", linewidth=0.8, zorder=1)
+        top_right.plot(
+            x, strat_batch, marker="o", color="#1f77b4",
+            label="silhouette_batch_stratified",
+        )
+        top_right.plot(
+            x, cond_after, marker="o", color="#d62728", label="silhouette_condition",
+        )
+        top_right.set_ylabel("Silhouette score (after residualization)")
+        top_right.set_title("Local mixing comparison")
+        top_right.legend(frameon=False)
+        plt.setp(top_right.get_xticklabels(), visible=False)
+
+        bottom_right.set_ylim(-0.05, 1.05)
+        bottom_right.plot(
+            x, kbet_accept, marker="s", color="#9467bd", label="kBET acceptance rate",
+        )
+        bottom_right.plot(
+            x, ilisi_after, marker="^", color="#ff7f0e", linestyle="--", label="iLISI",
+        )
+        bottom_right.set_xticks(x)
+        bottom_right.set_xticklabels(methods, rotation=30, ha="right")
+        bottom_right.set_xlim(-0.5, len(methods) - 0.5)
+        bottom_right.set_ylabel("Local mixing score (after residualization)")
+        bottom_right.legend(frameon=False)
+
+        fig.suptitle(space, fontsize=SUPTITLE_FONTSIZE)
+        fig.tight_layout(rect=[0, 0, 1, 0.96])
+
+        out_path = out_dir / f"{space}_comparison.png"
+        fig.savefig(out_path, dpi=150, bbox_inches="tight")
+        plt.close(fig)
+        out_paths.append(out_path)
+
+    return out_paths
 
 
 def _grouped_bars(

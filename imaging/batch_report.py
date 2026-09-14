@@ -61,6 +61,7 @@ SEED = 0
 BATCH_COL = "Metadata_batch"
 CONDITION_COL = "Metadata_condition"
 PLATE_COL = "Metadata_Plate"
+COUNT_COL = "Metadata_cell_count"
 DEFAULT_K0 = 90
 DEFAULT_KBET_ALPHA = 0.05
 
@@ -310,6 +311,31 @@ def compute_silhouette_scores(
         "ilisi": local_mixing["ilisi"],
         "clisi": local_mixing["clisi"],
         "kbet_rejection_rate": local_mixing["kbet_rejection_rate"],
+    }
+
+
+def compute_raw_pca_sample(
+    feature_space: str,
+    conditions: list = ALL_CONDITIONS,
+    cell_line: str = load.DEFAULT_CELL_LINE,
+    sample_size: Optional[int] = SAMPLE_SIZE,
+    seed: int = SEED,
+) -> dict:
+    """Load+jointly z-score `feature_space` across `conditions` (no
+    residualization) and return a row subsample, for a raw batch-effect PCA
+    snapshot (`utils.plot.make_batch_effect_pca_figure`). Independent of
+    any `RESIDUALIZE_METHODS` entry, so callers compute this once per
+    feature space rather than once per (feature_space, method) pair like
+    `compute_report`.
+
+    Pure: no disk writes, no plotting. Returns `{"meta_sample": ...,
+    "feats_sample": ...}`."""
+    meta, feats_raw = load_all_conditions(feature_space, conditions, cell_line)
+    feats = feat.zscore(feats_raw)
+    idx = _subsample_index(len(feats), sample_size, seed)
+    return {
+        "meta_sample": meta.iloc[idx].reset_index(drop=True),
+        "feats_sample": feats[idx],
     }
 
 

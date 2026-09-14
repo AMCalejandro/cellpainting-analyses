@@ -40,6 +40,7 @@ def copairs_main(
     out_dir: Path,
     condition: str,
     consistency_groupby: str = cp.DEFAULT_CONSISTENCY_GROUPBY,
+    pc_plots: bool = False,
 ) -> None:
     """Load -> preprocess (optional) -> residualize -> copairs for a set of
     feature spaces and Ridge covariate sets, saving one parquet per
@@ -47,6 +48,14 @@ def copairs_main(
     (default results/imaging/copairs/parquet/), then plotting a
     call-count/nMAP summary figure into <out-dir>/figures/ from those
     results.
+
+    If `pc_plots`, also save a before/after-residualization PCA (and UMAP,
+    if installed) diagnostic figure per (feature_space, covariate_set)
+    under <out-dir>/figures/pc_plots/ via `utils.plot.make_copairs_pc_figure`.
+    This only re-runs the cheap load/preprocess/residualize steps -- the
+    expensive copairs calls themselves are still skipped whenever their
+    parquet already exists, so this is safe to turn on for an already
+    completed run just to (re)generate the diagnostic figures.
     """
     parquet_dir = out_dir / "parquet"
     ap_cache_dir = out_dir / "ap_cache"
@@ -101,6 +110,21 @@ def copairs_main(
                 f"[{space}/{cov_key}] residualized in {time.time() - t0:.1f}s",
                 flush=True,
             )
+
+            if pc_plots:
+                t0 = time.time()
+                plot.make_copairs_pc_figure(
+                    feats,
+                    residual_feats,
+                    meta,
+                    out_dir / "figures" / "pc_plots",
+                    file_stub=f"{space}{condition_tag}_{cov_key}",
+                    title_prefix=f"{space} / {cov_key} ({condition})",
+                )
+                print(
+                    f"[{space}/{cov_key}] saved PC plot in {time.time() - t0:.1f}s",
+                    flush=True,
+                )
 
             for call_name, fn in call_fns.items():
                 file_stub = (
@@ -179,6 +203,15 @@ def add_copairs_parser(parser: argparse.ArgumentParser) -> None:
         choices=["Metadata_target", "Metadata_moa"],
         help="Grouping column for the consistency call's same-X-vs-different-X pairs.",
     )
+    parser.add_argument(
+        "--pc-plots",
+        action="store_true",
+        help=(
+            "Also save a before/after-residualization PCA diagnostic figure "
+            "(utils.plot.make_copairs_pc_figure) per (feature_space, "
+            "covariate_set) under <out-dir>/figures/pc_plots/."
+        ),
+    )
     parser.set_defaults(func=_run_copairs)
 
 
@@ -196,6 +229,119 @@ def _run_copairs(args: argparse.Namespace) -> None:
         Path(args.out_dir),
         args.condition,
         args.consistency_groupby,
+        args.pc_plots,
+    )
+
+
+# --- copairs-compare (cross-condition companions to copairs_main's figure) --
+
+
+def copairs_compare_main(
+    out_dir_base: Path,
+    conditions: list,
+    feature_spaces: list,
+    covariate_sets: list,
+    best_covariate_set: str,
+    save_dir: Optional[Path] = None,
+    consistency_groupby: str = cp.DEFAULT_CONSISTENCY_GROUPBY,
+) -> None:
+    """Build the cross-condition companions to copairs_main's per-condition
+    reproduced_figure.png, from each condition's ALREADY COMPUTED parquets
+    under `out_dir_base/<condition>/parquet/` (same per-condition layout
+    `copairs_main` writes, and `imaging.benchmark._condition_results_dir`
+    reads -- spaces in `condition` replaced with underscores for the
+    directory name, e.g. "Low Gluc" -> out_dir_base/Low_Gluc/). Does not
+    re-run copairs.
+
+    Saves under `save_dir` (defaults to `out_dir_base` itself, e.g.
+    results/imaging/copairs_v2/processed/ -- these figures span every
+    condition, so they don't belong inside any single condition's own
+    <condition>/figures/ directory alongside its per-condition
+    reproduced_figure.png):
+    - `reproduced_figure_all_conditions_<best_covariate_set>.png`
+      (`utils.plot.make_copairs_cross_condition_figure`): every condition,
+      all feature spaces, fixed to `best_covariate_set`.
+    - `reproduced_figure_<feature_space>_all_conditions.png`
+      (`utils.plot.make_copairs_feature_space_figure`), one per entry in
+      `feature_spaces` -- every condition, one feature space, across
+      `covariate_sets`.
+    """
+    out_dirs = {c: out_dir_base / c.replace(" ", "_") for c in conditions}
+    save_dir = save_dir or out_dir_base
+
+    path_a = plot.make_copairs_cross_condition_figure(
+        out_dirs, feature_spaces, best_covariate_set, save_dir, consistency_groupby,
+    )
+    print(f"Saved cross-condition figure -> {path_a}", flush=True)
+
+    for space in feature_spaces:
+        path_b = plot.make_copairs_feature_space_figure(
+            out_dirs, space, covariate_sets, save_dir, consistency_groupby,
+        )
+        print(f"Saved feature-space figure -> {path_b}", flush=True)
+
+
+def add_copairs_compare_parser(parser: argparse.ArgumentParser) -> None:
+    parser.description = (
+        "Cross-condition companions to `copairs` figure, built from already "
+        "computed parquets (does not re-run copairs)."
+    )
+    parser.add_argument(
+        "--out-dir-base",
+        type=str,
+        required=True,
+        help=(
+            "Parent directory holding one per-condition copairs out-dir each "
+            "(e.g. results/imaging/copairs_v2/processed, containing FFA/, "
+            "IL6/, Low_Gluc/ -- as produced by repeated `imaging copairs "
+            "--out-dir <out-dir-base>/<condition-with-spaces-replaced> "
+            "--condition <condition>` runs)."
+        ),
+    )
+    parser.add_argument("--conditions", type=str, default="FFA,IL6,Low Gluc")
+    parser.add_argument("--feature-spaces", type=str, default=",".join(FEATURE_SPACES))
+    parser.add_argument(
+        "--covariate-sets",
+        type=str,
+        default=None,
+        help="Comma-separated imaging.features.RESIDUALIZE_METHODS keys. "
+        "Defaults to features.WITHIN_CONDITION_METHODS.",
+    )
+    parser.add_argument(
+        "--best-covariate-set",
+        type=str,
+        default="count_batch_plate",
+        help="Covariate set the cross-condition (all-feature-space) figure is fixed to.",
+    )
+    parser.add_argument(
+        "--save-dir",
+        type=str,
+        default=None,
+        help="Defaults to <out-dir-base> itself.",
+    )
+    parser.add_argument(
+        "--consistency-groupby",
+        type=str,
+        default=cp.DEFAULT_CONSISTENCY_GROUPBY,
+        choices=["Metadata_target", "Metadata_moa"],
+    )
+    parser.set_defaults(func=_run_copairs_compare)
+
+
+def _run_copairs_compare(args: argparse.Namespace) -> None:
+    covariate_sets = (
+        args.covariate_sets.split(",")
+        if args.covariate_sets is not None
+        else list(feat.WITHIN_CONDITION_METHODS)
+    )
+    copairs_compare_main(
+        Path(args.out_dir_base),
+        args.conditions.split(","),
+        args.feature_spaces.split(","),
+        covariate_sets,
+        args.best_covariate_set,
+        Path(args.save_dir) if args.save_dir else None,
+        args.consistency_groupby,
     )
 
 
@@ -210,9 +356,21 @@ def batch_report_main(
     """Jointly load all hWAT conditions per feature space, z-score,
     Ridge-residualize with each covariate_sets entry, and report
     batch/condition silhouette scores + PCA/UMAP figures
-    (imaging.batch_report) into out_dir.
+    (imaging.batch_report) into out_dir, laid out as:
+
+        <out_dir>/<space>/raw/<space>_pca.png             -- one raw
+            batch-effect PCA snapshot per feature space (colored by cell
+            count/plate/batch), independent of --covariate-sets
+        <out_dir>/<space>/processed/<space>_<method>_{pca,umap}.png
+            and _metrics.json                              -- per-method
+            before/after residualization diagnostics
+        <out_dir>/batch_effect_metrics_comparison/          -- cross-method,
+            cross-feature-space comparison figures (the quick batch-effect
+            benchmark)
     """
     out_dir.mkdir(parents=True, exist_ok=True)
+    comparison_dir = out_dir / "batch_effect_metrics_comparison"
+    comparison_dir.mkdir(parents=True, exist_ok=True)
     # Split the requested methods so the comparison figure can shade the
     # pooled Ridge covariate sets (the ones whose plate dummies span the
     # condition direction) and draw everything else -- nested_*,
@@ -221,6 +379,26 @@ def batch_report_main(
     extra_methods = [m for m in covariate_sets if m not in feat.COVARIATE_SETS]
     metrics_by_space = {}
     for space in feature_spaces:
+        space_dir = out_dir / space.lower()
+        raw_dir = space_dir / "raw"
+        processed_dir = space_dir / "processed"
+        raw_dir.mkdir(parents=True, exist_ok=True)
+        processed_dir.mkdir(parents=True, exist_ok=True)
+
+        t0 = time.time()
+        raw = br.compute_raw_pca_sample(space)
+        raw_pca_path = plot.make_batch_effect_pca_figure(
+            raw["feats_sample"], raw["meta_sample"], raw_dir, file_stub=space,
+            title_prefix=space,
+            count_col=br.COUNT_COL, plate_col=br.PLATE_COL, batch_col=br.BATCH_COL,
+            seed=br.SEED,
+        )
+        print(
+            f"[{space}] saved raw batch-effect PCA -> {raw_pca_path} "
+            f"in {time.time() - t0:.1f}s",
+            flush=True,
+        )
+
         metrics_by_space[space] = {}
         for method in ridge_sets + extra_methods:
             t0 = time.time()
@@ -231,11 +409,11 @@ def batch_report_main(
             file_stub = f"{space}_{method}"
             plot.make_batch_report_figures(
                 result["before_sample"], result["after_sample"], result["meta_sample"],
-                out_dir, file_stub,
+                processed_dir, file_stub,
                 title_prefix=f"{space} / {method}",
                 batch_col=br.BATCH_COL, condition_col=br.CONDITION_COL, seed=br.SEED,
             )
-            (out_dir / f"{file_stub}_metrics.json").write_text(
+            (processed_dir / f"{file_stub}_metrics.json").write_text(
                 json.dumps(metrics, indent=2)
             )
 
@@ -258,13 +436,17 @@ def batch_report_main(
                 flush=True,
             )
     comparison_path = plot.make_covariate_comparison_figure(
-        metrics_by_space, out_dir, ridge_sets, extra_methods
+        metrics_by_space, comparison_dir, ridge_sets, extra_methods
     )
     print(f"Saved covariate-set comparison figure -> {comparison_path}", flush=True)
     local_mixing_path = plot.make_local_mixing_comparison_figure(
-        metrics_by_space, out_dir, ridge_sets, extra_methods
+        metrics_by_space, comparison_dir, ridge_sets, extra_methods
     )
     print(f"Saved local-mixing comparison figure -> {local_mixing_path}", flush=True)
+    per_space_paths = plot.make_feature_space_comparison_figures(
+        metrics_by_space, comparison_dir, ridge_sets, extra_methods
+    )
+    print(f"Saved per-feature-space comparison figures -> {per_space_paths}", flush=True)
 
 
 def add_batch_report_parser(parser: argparse.ArgumentParser) -> None:
@@ -272,7 +454,9 @@ def add_batch_report_parser(parser: argparse.ArgumentParser) -> None:
         "Batch/condition silhouette report: jointly load all hWAT "
         "conditions per feature space, z-score, Ridge-residualize with each "
         "--covariate-sets entry, and report batch/condition silhouette "
-        "scores + PCA/UMAP figures."
+        "scores + a raw batch-effect PCA snapshot + per-method PCA/UMAP "
+        "figures, under <out-dir>/<space>/{raw,processed}/ and "
+        "<out-dir>/batch_effect_metrics_comparison/."
     )
     parser.add_argument("--feature-spaces", type=str, default=",".join(FEATURE_SPACES))
     parser.add_argument(

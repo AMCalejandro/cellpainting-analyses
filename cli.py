@@ -38,6 +38,12 @@ def build_parser() -> argparse.ArgumentParser:
     imaging_cmds.add_copairs_parser(
         imaging_sub.add_parser("copairs", help="Copairs activity/distinctiveness/consistency pipeline.")
     )
+    imaging_cmds.add_copairs_compare_parser(
+        imaging_sub.add_parser(
+            "copairs-compare",
+            help="Cross-condition companion figures built from already computed copairs parquets.",
+        )
+    )
     imaging_cmds.add_batch_report_parser(
         imaging_sub.add_parser("batch_report", help="Batch/condition silhouette report.")
     )
