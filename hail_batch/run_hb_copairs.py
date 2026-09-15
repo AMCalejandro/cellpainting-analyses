@@ -33,6 +33,8 @@ def build_batch(config: dict, pipeline: str) -> hb.Batch:
         _add_imaging_jobs(b, config, hb_cfg, repo_cfg)
     elif pipeline == "proteomics":
         _add_proteomics_jobs(b, config, hb_cfg, repo_cfg)
+    elif pipeline == "reversion":
+        _add_reversion_jobs(b, config, hb_cfg, repo_cfg)
     else:
         raise ValueError(f"Unknown pipeline: {pipeline!r}")
 
@@ -141,6 +143,54 @@ def _add_proteomics_jobs(b: "hb.Batch", config: dict, hb_cfg: dict, repo_cfg: di
             b.write_output(j.ofile, f"{output_dir}/{tag}/results.tar.gz")
 
 
+def _add_reversion_jobs(b: "hb.Batch", config: dict, hb_cfg: dict, repo_cfg: dict) -> None:
+    """One job per (stress_condition, feature_space, covariate_set) triple --
+    `cli.py imaging copairs-reversion` scores one feature space / covariate
+    set / stress condition per invocation (same one-shot convention as the
+    axis-based `reversion` command, unlike `copairs`'s in-process sweep over
+    --feature-spaces/--covariate-sets), so all three axes are swept here
+    instead, one job each."""
+    rev_cfg = config["reversion-pipeline"]
+    baseline_condition = rev_cfg["baseline-condition"]
+    null_size = rev_cfg["null-size"]
+    output_dir = config["reversion-output-dir"].rstrip("/")
+
+    for stress_condition, condition_tag in rev_cfg["stress-conditions"].items():
+        for feature_space in rev_cfg["feature-spaces"]:
+            for covariate_set in rev_cfg["covariate-sets"]:
+                j = b.new_job(
+                    name=f"copairs-reversion {condition_tag} {feature_space} {covariate_set}"
+                )
+                j._machine_type = hb_cfg["machine-type"]
+                j.storage(hb_cfg["storage"])
+
+                data_inputs = {
+                    filename: b.read_input(gcs_path)
+                    for filename, gcs_path in config["data-files"].items()
+                }
+
+                _setup_commands(j, repo_cfg)
+
+                j.command("mkdir -p data/imaging")
+                for filename, local_input in data_inputs.items():
+                    j.command(f"cp {local_input} data/imaging/{quote(filename)}")
+
+                j.command(
+                    "pixi run python cli.py imaging copairs-reversion "
+                    f"--feature-space {quote(feature_space)} "
+                    f"--covariate-set {quote(covariate_set)} "
+                    f"--stress-condition {quote(stress_condition)} "
+                    f"--baseline-condition {quote(baseline_condition)} "
+                    f"--null-size {null_size} "
+                    "--out-dir results"
+                )
+
+                j.command("tar -czf results.tar.gz -C results .")
+                j.command(f"mv results.tar.gz {j.ofile}")
+                tag = f"{condition_tag}/{feature_space}_{covariate_set}"
+                b.write_output(j.ofile, f"{output_dir}/{tag}/results.tar.gz")
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -152,7 +202,7 @@ if __name__ == "__main__":
         "--pipeline",
         type=str,
         required=True,
-        choices=["imaging", "proteomics"],
+        choices=["imaging", "proteomics", "reversion"],
         help="Which pipeline to submit to Hail Batch.",
     )
     args = parser.parse_args()

@@ -40,5 +40,17 @@
     "covariates": ["plate", "batch", "batch_plate"],
     "null-size": 10000,
     "consistency-groupby": "Metadata_target"
+  },
+  "reversion-output-dir": "gs://nnf-amc/project/cp-imaging-adi/results/copairs_reversion/",
+  "reversion-pipeline": {
+    "stress-conditions": {
+      "FFA": "FFA",
+      "IL6": "IL6",
+      "Low Gluc": "Low_Gluc"
+    },
+    "baseline-condition": "Baseline",
+    "feature-spaces": ["CellProfiler", "CPCNN", "UniDino"],
+    "covariate-sets": ["nested_count_plate", "nested_count_batch_plate"],
+    "null-size": 10000
   }
 }

@@ -635,6 +635,192 @@ def reversion_main(
             )
 
 
+def _remap_for_copairs_reversion(
+    meta: pd.DataFrame, baseline_condition: str, stress_condition: str
+) -> pd.DataFrame:
+    """Bridge `imaging.reversion.load_joint_residualized`'s schema
+    (`Metadata_condition` lowercase, valued with the literal condition
+    strings passed in; `Metadata_pert_type` in {"trt", "negcon"}) onto the
+    generic Baseline/Stress + trt/control schema
+    `utils.copairs.run_reversion_pipeline` expects. Returns a copy; the
+    caller's own `meta` (and its `Metadata_condition`/`negcon` values) is
+    left untouched for the diagnostic figures, which key off it."""
+    remapped = meta.copy()
+    remapped["Metadata_Condition"] = remapped["Metadata_condition"].map(
+        {baseline_condition: "Baseline", stress_condition: "Stress"}
+    )
+    remapped["Metadata_pert_type"] = remapped["Metadata_pert_type"].replace(
+        {"negcon": "control"}
+    )
+    return remapped
+
+
+def copairs_reversion_main(
+    feature_space: str,
+    covariate_set: str,
+    stress_condition: str,
+    baseline_condition: str,
+    null_size: int,
+    seed: int,
+    out_dir: Path,
+    n_components: Optional[int] = None,
+    make_figures: bool = True,
+) -> None:
+    """Copairs-mAP compound reversion, for one feature space / covariate
+    set: jointly load Baseline + a stress condition
+    (`imaging.reversion.load_joint_residualized`), then hand the
+    residualized matrix to `utils.copairs.run_reversion_pipeline`, which
+    allowlists compounds active-in-stress AND inactive-in-baseline before
+    scoring reversion as a copairs mAP call. Saves one parquet under
+    out_dir/parquet/, plus (unless make_figures=False) the same
+    before/after-residualization PCA/UMAP diagnostic figures `reversion`
+    saves, under out_dir/figures/.
+
+    A different method from `reversion` (the axis/bootstrap-based command):
+    that one scores an axis projection under FDR-controlled bootstrap
+    gates; this one scores a copairs mAP call, gated by the
+    activity/baseline-activity allowlist instead. Same
+    --covariate-set caveat applies -- see `reversion`'s help.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    parquet_dir = out_dir / "parquet"
+    ap_cache_dir = out_dir / "ap_cache"
+    parquet_dir.mkdir(parents=True, exist_ok=True)
+    ap_cache_dir.mkdir(parents=True, exist_ok=True)
+
+    if covariate_set in ("count_plate", "count_batch_plate"):
+        print(
+            f"WARNING: --covariate-set {covariate_set} pools Baseline + "
+            f"{stress_condition} into one Ridge fit whose plate dummies span "
+            "the condition direction, so it removes the Baseline-stress "
+            "signal this call needs. Use nested_" + covariate_set,
+            flush=True,
+        )
+
+    t0 = time.time()
+    meta, feats_before, feats = rev.load_joint_residualized(
+        feature_space, covariate_set, baseline_condition, stress_condition, n_components
+    )
+    print(
+        f"[{feature_space}/{covariate_set}] loaded + jointly residualized"
+        f"{' + PCA-reduced (n_components=' + str(n_components) + ')' if n_components else ''} "
+        f"{feats.shape} ({baseline_condition} + {stress_condition}) in "
+        f"{time.time() - t0:.1f}s",
+        flush=True,
+    )
+
+    pca_tag = f"_pca{n_components}" if n_components else ""
+    file_stub = (
+        f"{feature_space}_{baseline_condition}_to_{stress_condition}_"
+        f"{covariate_set}{pca_tag}_copairs_reversion"
+    )
+
+    if make_figures:
+        t0 = time.time()
+        figures_dir = out_dir / "figures"
+        plot.make_reversion_diagnostic_figures(
+            feats_before,
+            feats,
+            meta,
+            figures_dir,
+            file_stub,
+            title_prefix=f"{feature_space} / {covariate_set}: {baseline_condition} -> {stress_condition}",
+        )
+        print(
+            f"[{feature_space}/{covariate_set}] saved joint-space PCA/UMAP "
+            f"diagnostics -> {figures_dir}/{file_stub}_{{pca,umap}}.png "
+            f"in {time.time() - t0:.1f}s",
+            flush=True,
+        )
+
+    reversion_meta = _remap_for_copairs_reversion(meta, baseline_condition, stress_condition)
+
+    t0 = time.time()
+    result = cp.run_reversion_pipeline(
+        reversion_meta,
+        feats,
+        null_size=null_size,
+        seed=seed,
+        cache_dir=paths.CACHE_DIR,
+        activity_cache_path=ap_cache_dir / f"{file_stub}_activity.parquet",
+        baseline_activity_cache_path=ap_cache_dir / f"{file_stub}_baseline_activity.parquet",
+        reversion_cache_path=ap_cache_dir / f"{file_stub}_reversion.parquet",
+    )
+    n_calls = int(result["below_corrected_p"].sum())
+    print(
+        f"[{feature_space}/{covariate_set}] {n_calls}/{len(result)} compounds "
+        f"called for reversion in {time.time() - t0:.1f}s",
+        flush=True,
+    )
+
+    out_path = parquet_dir / f"{file_stub}.parquet"
+    result.to_parquet(out_path)
+    print(f"Saved {out_path.name}", flush=True)
+
+
+def add_copairs_reversion_parser(parser: argparse.ArgumentParser) -> None:
+    parser.description = (
+        "Copairs-mAP compound reversion scoring for one feature space / "
+        "covariate set (jointly loads Baseline + a stress condition, "
+        "allowlists compounds active-in-stress and inactive-in-baseline, "
+        "then scores reversion as a copairs mAP call)."
+    )
+    parser.add_argument("--feature-space", type=str, default="CellProfiler")
+    parser.add_argument(
+        "--covariate-set",
+        type=str,
+        default="nested_count_plate",
+        help=(
+            "One of imaging.features.RESIDUALIZE_METHODS. Defaults to "
+            "nested_count_plate: fits the same Ridge count+plate correction "
+            "as count_plate, but separately within each condition, so it "
+            "doesn't remove the Baseline-stress offset this call needs. The "
+            "pooled count_plate / count_batch_plate destroy that signal here "
+            "and will warn if selected."
+        ),
+    )
+    parser.add_argument("--stress-condition", type=str, default="FFA")
+    parser.add_argument("--baseline-condition", type=str, default="Baseline")
+    parser.add_argument("--null-size", type=int, default=cp.NULL_SIZE)
+    parser.add_argument("--seed", type=int, default=cp.SEED)
+    parser.add_argument("--out-dir", type=str, default=str(paths.RESULTS_DIR))
+    parser.add_argument(
+        "--n-components",
+        type=int,
+        default=None,
+        help=(
+            "If given, PCA-reduce the jointly residualized Baseline+stress "
+            "feature matrix to this many components (via "
+            "imaging.features.reduce_dimensionality), AFTER residualizing. "
+            "Omit to score the full-dimension z-scored features."
+        ),
+    )
+    parser.add_argument(
+        "--skip-figures",
+        action="store_true",
+        help=(
+            "Skip the PCA/UMAP before-vs-after-residualization diagnostic "
+            "figures (utils.plot.make_reversion_diagnostic_figures), saved "
+            "by default to <out-dir>/figures/."
+        ),
+    )
+    parser.set_defaults(func=_run_copairs_reversion)
+
+
+def _run_copairs_reversion(args: argparse.Namespace) -> None:
+    copairs_reversion_main(
+        args.feature_space,
+        args.covariate_set,
+        args.stress_condition,
+        args.baseline_condition,
+        args.null_size,
+        args.seed,
+        Path(args.out_dir),
+        args.n_components,
+        not args.skip_figures,
+    )
+
+
 def add_reversion_parser(parser: argparse.ArgumentParser) -> None:
     parser.description = (
         "Score compound reversion for one feature space / covariate set "

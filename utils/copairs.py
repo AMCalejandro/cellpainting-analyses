@@ -36,6 +36,7 @@ ACTIVITY_THRESHOLD = 0.10
 DISTINCTIVENESS_THRESHOLD = 0.10
 DEFAULT_CONSISTENCY_GROUPBY = "Metadata_target"
 CONSISTENCY_THRESHOLD = 0.05
+REVERSION_THRESHOLD = 0.10
 
 
 def _add_normalized_ap(
@@ -203,6 +204,207 @@ def compute_consistency(
         cache_dir=cache_dir,
     )
     return _add_normalized_ap(map_df, ap_scores, [groupby], null_size, seed, cache_dir)
+
+
+# --- reversion (Stress -> Baseline phenotype recovery) -------------------
+# A compound is only worth scoring for reversion if it's active where it's
+# supposed to act (Stress) and inert where it shouldn't (Baseline) -- see
+# `run_reversion_pipeline`, which builds that allowlist from
+# `compute_activity`/`compute_baseline_activity` before calling
+# `compute_reversion`. Unlike distinctiveness, reversion deliberately does
+# NOT filter on how distinct a compound's phenotype is: a true reversion
+# hit can legitimately land on the same recovered phenotype as other hits.
+
+
+def compute_baseline_activity(
+    meta: pd.DataFrame,
+    feats: np.ndarray,
+    null_size: int = NULL_SIZE,
+    seed: int = SEED,
+    cache_dir: Optional[Union[str, Path]] = None,
+    ap_cache_path: Optional[Union[str, Path]] = None,
+) -> pd.DataFrame:
+    """Activity call restricted to the Baseline condition -- the safety
+    check `run_reversion_pipeline` uses to exclude compounds with a
+    non-specific/cytotoxic effect even in the healthy state. Identical to
+    `compute_activity` otherwise: same pairing rules, just computed on the
+    Baseline-only subset."""
+
+    def _compute():
+        baseline = (meta["Metadata_Condition"] == "Baseline").to_numpy()
+        b_meta, b_feats = meta.loc[baseline], feats[baseline]
+        ap_scores = average_precision(
+            b_meta,
+            b_feats,
+            pos_sameby=["Metadata_broad_sample"],
+            pos_diffby=["Metadata_batch"],
+            neg_sameby=["Metadata_Plate"],
+            neg_diffby=["Metadata_broad_sample", "Metadata_pert_type"],
+        )
+        return ap_scores[ap_scores["Metadata_pert_type"] == "trt"]
+
+    ap_scores = _cached_ap_scores(ap_cache_path, _compute)
+    map_df = mean_average_precision(
+        ap_scores,
+        sameby=["Metadata_broad_sample"],
+        null_size=null_size,
+        threshold=ACTIVITY_THRESHOLD,
+        seed=seed,
+        cache_dir=cache_dir,
+    )
+    return _add_normalized_ap(
+        map_df, ap_scores, ["Metadata_broad_sample"], null_size, seed, cache_dir
+    )
+
+
+def compute_reversion(
+    meta: pd.DataFrame,
+    feats: np.ndarray,
+    null_size: int = NULL_SIZE,
+    seed: int = SEED,
+    cache_dir: Optional[Union[str, Path]] = None,
+    ap_cache_path: Optional[Union[str, Path]] = None,
+) -> pd.DataFrame:
+    """Is a Stress-treated compound closer to Baseline's own DMSO controls
+    than to its Stress condition's DMSO controls?
+
+    copairs matches pairs on identical strings, so the three groups that
+    matter here are relabeled onto one `_reversion_target` column before
+    calling `average_precision`:
+
+    - Stress/trt and Baseline/control both get "Target_State" -- the
+      positive pairs (`pos_sameby=["_reversion_target"]`,
+      `pos_diffby=["Metadata_Condition", "Metadata_pert_type"]`) are then
+      exactly "this treated well" vs. "a healthy control well", i.e. how
+      close treatment gets a Stress well to looking like Baseline.
+    - Stress/control gets "Disease_State" -- the negative pairs
+      (`neg_diffby=["_reversion_target"]`) are "this treated (or healthy
+      control) well" vs. "this condition's own untreated/diseased state",
+      the thing reversion is supposed to move away from.
+
+    Every other row (e.g. Baseline/trt) is dropped -- it's neither arm of
+    this comparison. `mean_average_precision` is still grouped by
+    `Metadata_broad_sample`, one nMAP per compound, same as
+    `compute_activity`/`compute_distinctiveness`.
+    """
+
+    def _compute():
+        stress_trt = (meta["Metadata_Condition"] == "Stress") & (
+            meta["Metadata_pert_type"] == "trt"
+        )
+        baseline_ctrl = (meta["Metadata_Condition"] == "Baseline") & (
+            meta["Metadata_pert_type"] == "control"
+        )
+        stress_ctrl = (meta["Metadata_Condition"] == "Stress") & (
+            meta["Metadata_pert_type"] == "control"
+        )
+
+        mask = (stress_trt | baseline_ctrl | stress_ctrl).to_numpy()
+        r_meta, r_feats = meta.loc[mask].copy(), feats[mask]
+        r_meta["_reversion_target"] = np.where(
+            (r_meta["Metadata_Condition"] == "Stress")
+            & (r_meta["Metadata_pert_type"] == "control"),
+            "Disease_State",
+            "Target_State",
+        )
+
+        return average_precision(
+            r_meta,
+            r_feats,
+            pos_sameby=["_reversion_target"],
+            pos_diffby=["Metadata_Condition", "Metadata_pert_type"],
+            neg_sameby=[],
+            neg_diffby=["_reversion_target"],
+        )
+
+    ap_scores = _cached_ap_scores(ap_cache_path, _compute)
+    map_df = mean_average_precision(
+        ap_scores,
+        sameby=["Metadata_broad_sample"],
+        null_size=null_size,
+        threshold=REVERSION_THRESHOLD,
+        seed=seed,
+        cache_dir=cache_dir,
+    )
+    return _add_normalized_ap(
+        map_df, ap_scores, ["Metadata_broad_sample"], null_size, seed, cache_dir
+    )
+
+
+def run_reversion_pipeline(
+    meta: pd.DataFrame,
+    feats: np.ndarray,
+    null_size: int = NULL_SIZE,
+    seed: int = SEED,
+    cache_dir: Optional[Union[str, Path]] = None,
+    activity_cache_path: Optional[Union[str, Path]] = None,
+    baseline_activity_cache_path: Optional[Union[str, Path]] = None,
+    reversion_cache_path: Optional[Union[str, Path]] = None,
+) -> pd.DataFrame:
+    """Allowlist a compound for reversion scoring only if it's active in
+    Stress (real biological effect to potentially reverse) AND inactive in
+    Baseline (no non-specific/cytotoxic effect on an already-healthy cell),
+    then run `compute_reversion` on that allowlist. Deliberately does not
+    also require distinctiveness -- see module note above.
+
+    Steps:
+    1. `compute_activity` on the Stress subset -> active compounds
+       (`below_corrected_p == True`).
+    2. `compute_baseline_activity` on the full dataset -> safe compounds
+       (`below_corrected_p == False`).
+    3. Allowlist = intersection of the two.
+    4. Final subset = Stress/trt wells for allowlisted compounds, PLUS
+       every control well (both conditions) -- `compute_reversion` needs
+       both control arms regardless of which compounds are allowlisted.
+    5. `compute_reversion` on that subset.
+    """
+    stress = (meta["Metadata_Condition"] == "Stress").to_numpy()
+    stress_activity = compute_activity(
+        meta.loc[stress],
+        feats[stress],
+        null_size=null_size,
+        seed=seed,
+        cache_dir=cache_dir,
+        ap_cache_path=activity_cache_path,
+    )
+    active_compounds = set(
+        stress_activity.loc[
+            stress_activity["below_corrected_p"], "Metadata_broad_sample"
+        ]
+    )
+
+    baseline_activity = compute_baseline_activity(
+        meta,
+        feats,
+        null_size=null_size,
+        seed=seed,
+        cache_dir=cache_dir,
+        ap_cache_path=baseline_activity_cache_path,
+    )
+    safe_compounds = set(
+        baseline_activity.loc[
+            ~baseline_activity["below_corrected_p"], "Metadata_broad_sample"
+        ]
+    )
+
+    allowlist = active_compounds & safe_compounds
+
+    allowed_stress_trt = (
+        stress
+        & (meta["Metadata_pert_type"] == "trt").to_numpy()
+        & meta["Metadata_broad_sample"].isin(allowlist).to_numpy()
+    )
+    control_wells = (meta["Metadata_pert_type"] == "control").to_numpy()
+    mask = allowed_stress_trt | control_wells
+
+    return compute_reversion(
+        meta.loc[mask],
+        feats[mask],
+        null_size=null_size,
+        seed=seed,
+        cache_dir=cache_dir,
+        ap_cache_path=reversion_cache_path,
+    )
 
 
 # --- hit-set agreement + allowlist enrichment ---------------------------
