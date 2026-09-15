@@ -50,7 +50,7 @@
     },
     "baseline-condition": "Baseline",
     "feature-spaces": ["CellProfiler", "CPCNN", "UniDino"],
-    "covariate-sets": ["nested_count_plate", "nested_count_batch_plate"],
+    "covariate-sets": ["nested_count_batch_plate"],
     "null-size": 10000
   }
 }

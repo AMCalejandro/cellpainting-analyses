@@ -30,6 +30,8 @@ from copairs import compute
 from copairs.map import average_precision, mean_average_precision
 from copairs.map import multilabel as cp_multilabel
 
+from .reversion import _bh_adjust
+
 NULL_SIZE = 10000
 SEED = 0
 ACTIVITY_THRESHOLD = 0.10
@@ -283,9 +285,55 @@ def compute_reversion(
       the thing reversion is supposed to move away from.
 
     Every other row (e.g. Baseline/trt) is dropped -- it's neither arm of
-    this comparison. `mean_average_precision` is still grouped by
-    `Metadata_broad_sample`, one nMAP per compound, same as
-    `compute_activity`/`compute_distinctiveness`.
+    this comparison.
+
+    Significance does NOT use `mean_average_precision`'s permutation null
+    (copairs' `get_null_dists`, a random-ranking null keyed only on
+    (n_pos_pairs, n_total_pairs)), unlike activity/distinctiveness/
+    consistency. Two things ruled that null out:
+
+    1. Baseline and Stress never share a plate
+       (`imaging.reversion.load_joint_residualized`'s docstring), so every
+       screened compound in a given run sees the SAME (n_pos_pairs,
+       n_total_pairs) config -- the permutation null's only inputs.
+       Empirically (docs/reversion_axis_confound.md) every compound's raw
+       AP landed near a uniform ~0.40 against a ~0.60 null, giving a
+       uniform ~-0.5 normalized AP and zero hits everywhere, regardless of
+       condition or feature space.
+    2. That's not a bad-null artifact: re-scoring Stress-DMSO wells
+       themselves under the identical pairing rules (temporarily
+       relabelling half of them "trt", so they compete for the same
+       Target_State/Disease_State pools a real compound does) gives an
+       EMPIRICAL null of ~0.58 -- matching the permutation null, not the
+       ~0.40 real compounds score. The null was already a good estimate of
+       "AP with zero true compound effect"; the gap is elsewhere.
+
+    That elsewhere is `run_reversion_pipeline`'s own allowlist: every
+    compound handed to this function already cleared `compute_activity`,
+    i.e. it has real, detectable movement in Stress. That movement adds
+    genuine perturbation-specific variance whether or not it happens to
+    point toward Baseline, so an active compound's wells are structurally
+    less mutually self-similar than untreated DMSO replicates -- comparing
+    its AP to a DMSO-vs-DMSO null (permutation OR empirical) compares it to
+    the wrong reference population and reads as "below null" almost by
+    construction, independent of true reversion.
+
+    The fix: calibrate each compound against the pool of every OTHER
+    screened compound's own per-well AP (from this same call) instead of
+    any DMSO-derived null -- every compound here passed the same activity
+    gate, so this pool is the correct "active, but not necessarily
+    reverting" reference class. For a compound with `n_reps` replicate
+    wells, the null is the mean AP of `n_reps` wells bootstrap-resampled
+    (with replacement, `null_size` draws) from the pooled per-well AP of
+    every compound in the call; `p_value` is the resulting one-sided
+    bootstrap p, BH-adjusted into `corrected_p_value`
+    (`below_corrected_p` at `REVERSION_THRESHOLD`, matching activity/
+    distinctiveness's convention), and `normalized_average_precision` is
+    `(ap - null_mean) / (1 - null_mean)` against that same null. With very
+    few screened compounds (e.g. a 1-2 compound allowlist), this pool is
+    too small to say anything -- every compound will look "typical"
+    relative to its own tiny peer group, which is the correct (not
+    broken) behavior for a test with no real reference population.
     """
 
     def _compute():
@@ -318,17 +366,43 @@ def compute_reversion(
         )
 
     ap_scores = _cached_ap_scores(ap_cache_path, _compute)
-    map_df = mean_average_precision(
-        ap_scores,
-        sameby=["Metadata_broad_sample"],
-        null_size=null_size,
-        threshold=REVERSION_THRESHOLD,
-        seed=seed,
-        cache_dir=cache_dir,
+    trt_scores = ap_scores.loc[
+        (ap_scores["Metadata_pert_type"] == "trt")
+        & ap_scores["average_precision"].notna()
+    ]
+    pool_ap = trt_scores["average_precision"].to_numpy()
+
+    per_compound = (
+        trt_scores.groupby("Metadata_broad_sample", observed=True)["average_precision"]
+        .agg(mean_average_precision="mean", n_reps="size")
+        .reset_index()
     )
-    return _add_normalized_ap(
-        map_df, ap_scores, ["Metadata_broad_sample"], null_size, seed, cache_dir
+
+    rng = np.random.default_rng(seed)
+    p_values = np.empty(len(per_compound))
+    normalized_ap = np.empty(len(per_compound))
+    null_cache: dict = {}
+    for i, (n_reps, obs) in enumerate(
+        zip(per_compound["n_reps"], per_compound["mean_average_precision"])
+    ):
+        n_reps = int(n_reps)
+        if n_reps not in null_cache:
+            draws = rng.choice(pool_ap, size=(null_size, n_reps), replace=True)
+            null_cache[n_reps] = draws.mean(axis=1)
+        null_dist = null_cache[n_reps]
+        # (k+1)/(n+1): a bootstrap p-value of exactly 0 is not defensible.
+        p_values[i] = (float(np.sum(null_dist >= obs)) + 1) / (len(null_dist) + 1)
+        null_mean = float(null_dist.mean())
+        normalized_ap[i] = (obs - null_mean) / (1 - null_mean)
+
+    per_compound["p_value"] = p_values
+    per_compound["normalized_average_precision"] = normalized_ap
+    per_compound["corrected_p_value"] = _bh_adjust(p_values)
+    per_compound["below_p"] = per_compound["p_value"] < REVERSION_THRESHOLD
+    per_compound["below_corrected_p"] = (
+        per_compound["corrected_p_value"] < REVERSION_THRESHOLD
     )
+    return per_compound
 
 
 def run_reversion_pipeline(
