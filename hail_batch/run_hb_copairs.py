@@ -149,11 +149,41 @@ def _add_reversion_jobs(b: "hb.Batch", config: dict, hb_cfg: dict, repo_cfg: dic
     set / stress condition per invocation (same one-shot convention as the
     axis-based `reversion` command, unlike `copairs`'s in-process sweep over
     --feature-spaces/--covariate-sets), so all three axes are swept here
-    instead, one job each."""
+    instead, one job each.
+
+    `copairs-reversion` now requires a PRENOMINATED compound allowlist --
+    a per-condition `compute_activity` call for the stress condition and one
+    for baseline, each computed on that condition's OWN (not jointly
+    residualized) feature space by `--pipeline imaging`, not by this
+    reversion pipeline. Each job here therefore reads the already uploaded
+    `results.tar.gz` for its stress condition and for baseline from
+    `output-dir` (the same GCS layout `_add_imaging_jobs` writes) and
+    extracts the one activity parquet it needs, tagged with
+    `reversion-pipeline.activity-covariate-set` (independent of this job's
+    own `--covariate-set`, which is for the JOINT Baseline+stress
+    residualization instead). This is a hard prerequisite: run
+    `--pipeline imaging` (with every condition in `reversion-pipeline`'s
+    `stress-conditions` plus `baseline-condition` present in
+    `pipeline.conditions`) to completion before `--pipeline reversion`.
+    """
     rev_cfg = config["reversion-pipeline"]
     baseline_condition = rev_cfg["baseline-condition"]
     null_size = rev_cfg["null-size"]
     output_dir = config["reversion-output-dir"].rstrip("/")
+    activity_covariate_set = rev_cfg["activity-covariate-set"]
+    imaging_output_dir = config["output-dir"].rstrip("/")
+    imaging_condition_tags = config["pipeline"]["conditions"]
+    # Matches imaging.load.DEFAULT_CONDITION: copairs_main only tags a
+    # result filename with its condition when it isn't this one.
+    default_imaging_condition = "FFA"
+
+    def _activity_tarball(condition: str) -> str:
+        tag = imaging_condition_tags[condition]
+        return f"{imaging_output_dir}/{tag}/results.tar.gz"
+
+    def _activity_parquet_rel_path(condition: str, feature_space: str) -> str:
+        condition_tag = "" if condition == default_imaging_condition else f"_{condition}"
+        return f"parquet/{feature_space}{condition_tag}_{activity_covariate_set}_activity.parquet"
 
     for stress_condition, condition_tag in rev_cfg["stress-conditions"].items():
         for feature_space in rev_cfg["feature-spaces"]:
@@ -168,6 +198,8 @@ def _add_reversion_jobs(b: "hb.Batch", config: dict, hb_cfg: dict, repo_cfg: dic
                     filename: b.read_input(gcs_path)
                     for filename, gcs_path in config["data-files"].items()
                 }
+                stress_activity_tarball = b.read_input(_activity_tarball(stress_condition))
+                baseline_activity_tarball = b.read_input(_activity_tarball(baseline_condition))
 
                 _setup_commands(j, repo_cfg)
 
@@ -175,12 +207,24 @@ def _add_reversion_jobs(b: "hb.Batch", config: dict, hb_cfg: dict, repo_cfg: dic
                 for filename, local_input in data_inputs.items():
                     j.command(f"cp {local_input} data/imaging/{quote(filename)}")
 
+                j.command("mkdir -p stress_activity baseline_activity")
+                j.command(f"tar -xzf {stress_activity_tarball} -C stress_activity")
+                j.command(f"tar -xzf {baseline_activity_tarball} -C baseline_activity")
+                activity_parquet = (
+                    f"stress_activity/{_activity_parquet_rel_path(stress_condition, feature_space)}"
+                )
+                baseline_activity_parquet = (
+                    f"baseline_activity/{_activity_parquet_rel_path(baseline_condition, feature_space)}"
+                )
+
                 j.command(
                     "pixi run python cli.py imaging copairs-reversion "
                     f"--feature-space {quote(feature_space)} "
                     f"--covariate-set {quote(covariate_set)} "
                     f"--stress-condition {quote(stress_condition)} "
                     f"--baseline-condition {quote(baseline_condition)} "
+                    f"--activity-parquet {quote(activity_parquet)} "
+                    f"--baseline-activity-parquet {quote(baseline_activity_parquet)} "
                     f"--null-size {null_size} "
                     "--out-dir results"
                 )

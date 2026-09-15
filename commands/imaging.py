@@ -642,7 +642,7 @@ def _remap_for_copairs_reversion(
     (`Metadata_condition` lowercase, valued with the literal condition
     strings passed in; `Metadata_pert_type` in {"trt", "negcon"}) onto the
     generic Baseline/Stress + trt/control schema
-    `utils.copairs.run_reversion_pipeline` expects. Returns a copy; the
+    `utils.copairs.compute_reversion` expects. Returns a copy; the
     caller's own `meta` (and its `Metadata_condition`/`negcon` values) is
     left untouched for the diagnostic figures, which key off it."""
     remapped = meta.copy()
@@ -663,22 +663,33 @@ def copairs_reversion_main(
     null_size: int,
     seed: int,
     out_dir: Path,
+    activity_parquet: Path,
+    baseline_activity_parquet: Path,
     n_components: Optional[int] = None,
     make_figures: bool = True,
 ) -> None:
     """Copairs-mAP compound reversion, for one feature space / covariate
     set: jointly load Baseline + a stress condition
-    (`imaging.reversion.load_joint_residualized`), then hand the
-    residualized matrix to `utils.copairs.run_reversion_pipeline`, which
-    allowlists compounds active-in-stress AND inactive-in-baseline before
-    scoring reversion as a copairs mAP call. Saves one parquet under
+    (`imaging.reversion.load_joint_residualized`), restrict to a
+    PRENOMINATED compound allowlist, then score reversion as a copairs mAP
+    call (`utils.copairs.compute_reversion`). Saves one parquet under
     out_dir/parquet/, plus (unless make_figures=False) the same
     before/after-residualization PCA/UMAP diagnostic figures `reversion`
     saves, under out_dir/figures/.
 
+    `activity_parquet` / `baseline_activity_parquet` are `compute_activity`
+    outputs from `imaging copairs --condition <stress_condition>` /
+    `imaging copairs --condition <baseline_condition>` -- each computed on
+    that condition's OWN (per-condition, not jointly residualized) feature
+    space. The allowlist is active-in-stress (`below_corrected_p == True`
+    in `activity_parquet`) AND inactive-in-baseline (`below_corrected_p ==
+    False` in `baseline_activity_parquet`), matching the safety rationale
+    `utils.copairs.compute_reversion`'s docstring assumes of its allowlist.
+    This command does not compute activity itself.
+
     A different method from `reversion` (the axis/bootstrap-based command):
     that one scores an axis projection under FDR-controlled bootstrap
-    gates; this one scores a copairs mAP call, gated by the
+    gates; this one scores a copairs mAP call, gated by the same
     activity/baseline-activity allowlist instead. Same
     --covariate-set caveat applies -- see `reversion`'s help.
     """
@@ -696,6 +707,22 @@ def copairs_reversion_main(
             "signal this call needs. Use nested_" + covariate_set,
             flush=True,
         )
+
+    active_compounds = _load_significant_compounds(activity_parquet)
+    baseline_activity = pd.read_parquet(baseline_activity_parquet)
+    safe_compounds = set(
+        baseline_activity.loc[
+            ~baseline_activity["below_corrected_p"], "Metadata_broad_sample"
+        ]
+    )
+    allowlist = active_compounds & safe_compounds
+    print(
+        f"[{feature_space}/{covariate_set}] {len(active_compounds)} active in "
+        f"{stress_condition} ({activity_parquet}) & {len(safe_compounds)} safe "
+        f"in {baseline_condition} ({baseline_activity_parquet}) -> "
+        f"{len(allowlist)} allowlisted",
+        flush=True,
+    )
 
     t0 = time.time()
     meta, feats_before, feats = rev.load_joint_residualized(
@@ -735,16 +762,25 @@ def copairs_reversion_main(
 
     reversion_meta = _remap_for_copairs_reversion(meta, baseline_condition, stress_condition)
 
+    # Stress/trt wells for allowlisted compounds, PLUS every control well
+    # (both conditions) -- `compute_reversion` needs both control arms
+    # regardless of which compounds are allowlisted.
+    allowed_stress_trt = (
+        (reversion_meta["Metadata_Condition"] == "Stress")
+        & (reversion_meta["Metadata_pert_type"] == "trt")
+        & reversion_meta["Metadata_broad_sample"].isin(allowlist)
+    ).to_numpy()
+    control_wells = (reversion_meta["Metadata_pert_type"] == "control").to_numpy()
+    mask = allowed_stress_trt | control_wells
+
     t0 = time.time()
-    result = cp.run_reversion_pipeline(
-        reversion_meta,
-        feats,
+    result = cp.compute_reversion(
+        reversion_meta.loc[mask],
+        feats[mask],
         null_size=null_size,
         seed=seed,
         cache_dir=paths.CACHE_DIR,
-        activity_cache_path=ap_cache_dir / f"{file_stub}_activity.parquet",
-        baseline_activity_cache_path=ap_cache_dir / f"{file_stub}_baseline_activity.parquet",
-        reversion_cache_path=ap_cache_dir / f"{file_stub}_reversion.parquet",
+        ap_cache_path=ap_cache_dir / f"{file_stub}_reversion.parquet",
     )
     n_calls = int(result["below_corrected_p"].sum())
     print(
@@ -762,8 +798,9 @@ def add_copairs_reversion_parser(parser: argparse.ArgumentParser) -> None:
     parser.description = (
         "Copairs-mAP compound reversion scoring for one feature space / "
         "covariate set (jointly loads Baseline + a stress condition, "
-        "allowlists compounds active-in-stress and inactive-in-baseline, "
-        "then scores reversion as a copairs mAP call)."
+        "restricts to a prenominated compound allowlist loaded from "
+        "already computed per-condition activity calls, then scores "
+        "reversion as a copairs mAP call)."
     )
     parser.add_argument("--feature-space", type=str, default="CellProfiler")
     parser.add_argument(
@@ -781,6 +818,30 @@ def add_copairs_reversion_parser(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--stress-condition", type=str, default="FFA")
     parser.add_argument("--baseline-condition", type=str, default="Baseline")
+    parser.add_argument(
+        "--activity-parquet",
+        type=str,
+        required=True,
+        help=(
+            "Path to a compute_activity output parquet from "
+            "`imaging copairs --condition <stress-condition>` (e.g. "
+            "results/imaging/copairs/FFA/parquet/"
+            "CellProfiler_nested_count_plate_activity.parquet). Compounds "
+            "with below_corrected_p == True are the active-in-stress half "
+            "of the allowlist."
+        ),
+    )
+    parser.add_argument(
+        "--baseline-activity-parquet",
+        type=str,
+        required=True,
+        help=(
+            "Path to a compute_activity output parquet from "
+            "`imaging copairs --condition <baseline-condition>`. Compounds "
+            "with below_corrected_p == False are the inactive-in-baseline "
+            "half of the allowlist."
+        ),
+    )
     parser.add_argument("--null-size", type=int, default=cp.NULL_SIZE)
     parser.add_argument("--seed", type=int, default=cp.SEED)
     parser.add_argument("--out-dir", type=str, default=str(paths.RESULTS_DIR))
@@ -816,6 +877,8 @@ def _run_copairs_reversion(args: argparse.Namespace) -> None:
         args.null_size,
         args.seed,
         Path(args.out_dir),
+        Path(args.activity_parquet),
+        Path(args.baseline_activity_parquet),
         args.n_components,
         not args.skip_figures,
     )

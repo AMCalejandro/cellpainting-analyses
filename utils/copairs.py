@@ -210,53 +210,19 @@ def compute_consistency(
 
 # --- reversion (Stress -> Baseline phenotype recovery) -------------------
 # A compound is only worth scoring for reversion if it's active where it's
-# supposed to act (Stress) and inert where it shouldn't (Baseline) -- see
-# `run_reversion_pipeline`, which builds that allowlist from
-# `compute_activity`/`compute_baseline_activity` before calling
-# `compute_reversion`. Unlike distinctiveness, reversion deliberately does
-# NOT filter on how distinct a compound's phenotype is: a true reversion
-# hit can legitimately land on the same recovered phenotype as other hits.
-
-
-def compute_baseline_activity(
-    meta: pd.DataFrame,
-    feats: np.ndarray,
-    null_size: int = NULL_SIZE,
-    seed: int = SEED,
-    cache_dir: Optional[Union[str, Path]] = None,
-    ap_cache_path: Optional[Union[str, Path]] = None,
-) -> pd.DataFrame:
-    """Activity call restricted to the Baseline condition -- the safety
-    check `run_reversion_pipeline` uses to exclude compounds with a
-    non-specific/cytotoxic effect even in the healthy state. Identical to
-    `compute_activity` otherwise: same pairing rules, just computed on the
-    Baseline-only subset."""
-
-    def _compute():
-        baseline = (meta["Metadata_Condition"] == "Baseline").to_numpy()
-        b_meta, b_feats = meta.loc[baseline], feats[baseline]
-        ap_scores = average_precision(
-            b_meta,
-            b_feats,
-            pos_sameby=["Metadata_broad_sample"],
-            pos_diffby=["Metadata_batch"],
-            neg_sameby=["Metadata_Plate"],
-            neg_diffby=["Metadata_broad_sample", "Metadata_pert_type"],
-        )
-        return ap_scores[ap_scores["Metadata_pert_type"] == "trt"]
-
-    ap_scores = _cached_ap_scores(ap_cache_path, _compute)
-    map_df = mean_average_precision(
-        ap_scores,
-        sameby=["Metadata_broad_sample"],
-        null_size=null_size,
-        threshold=ACTIVITY_THRESHOLD,
-        seed=seed,
-        cache_dir=cache_dir,
-    )
-    return _add_normalized_ap(
-        map_df, ap_scores, ["Metadata_broad_sample"], null_size, seed, cache_dir
-    )
+# supposed to act (Stress) and inert where it shouldn't (Baseline). That
+# allowlist comes from PRENOMINATED, per-condition `compute_activity` calls
+# (one run of `imaging copairs --condition <stress_condition>`, one of
+# `imaging copairs --condition <baseline_condition>` -- each on that
+# condition's OWN feature space, never the jointly residualized one) loaded
+# by `commands.imaging.copairs_reversion_main` before it calls
+# `compute_reversion` below. This module does not generate activity calls
+# itself for reversion -- see that function's docstring for why scoring
+# against the jointly residualized space would be the wrong population to
+# calibrate activity against. Unlike distinctiveness, reversion deliberately
+# does NOT filter on how distinct a compound's phenotype is: a true
+# reversion hit can legitimately land on the same recovered phenotype as
+# other hits.
 
 
 def compute_reversion(
@@ -308,8 +274,9 @@ def compute_reversion(
        ~0.40 real compounds score. The null was already a good estimate of
        "AP with zero true compound effect"; the gap is elsewhere.
 
-    That elsewhere is `run_reversion_pipeline`'s own allowlist: every
-    compound handed to this function already cleared `compute_activity`,
+    That elsewhere is the caller's own prenominated allowlist (see the
+    module note above `compute_reversion`): every compound handed to this
+    function already cleared a per-condition `compute_activity` call,
     i.e. it has real, detectable movement in Stress. That movement adds
     genuine perturbation-specific variance whether or not it happens to
     point toward Baseline, so an active compound's wells are structurally
@@ -403,82 +370,6 @@ def compute_reversion(
         per_compound["corrected_p_value"] < REVERSION_THRESHOLD
     )
     return per_compound
-
-
-def run_reversion_pipeline(
-    meta: pd.DataFrame,
-    feats: np.ndarray,
-    null_size: int = NULL_SIZE,
-    seed: int = SEED,
-    cache_dir: Optional[Union[str, Path]] = None,
-    activity_cache_path: Optional[Union[str, Path]] = None,
-    baseline_activity_cache_path: Optional[Union[str, Path]] = None,
-    reversion_cache_path: Optional[Union[str, Path]] = None,
-) -> pd.DataFrame:
-    """Allowlist a compound for reversion scoring only if it's active in
-    Stress (real biological effect to potentially reverse) AND inactive in
-    Baseline (no non-specific/cytotoxic effect on an already-healthy cell),
-    then run `compute_reversion` on that allowlist. Deliberately does not
-    also require distinctiveness -- see module note above.
-
-    Steps:
-    1. `compute_activity` on the Stress subset -> active compounds
-       (`below_corrected_p == True`).
-    2. `compute_baseline_activity` on the full dataset -> safe compounds
-       (`below_corrected_p == False`).
-    3. Allowlist = intersection of the two.
-    4. Final subset = Stress/trt wells for allowlisted compounds, PLUS
-       every control well (both conditions) -- `compute_reversion` needs
-       both control arms regardless of which compounds are allowlisted.
-    5. `compute_reversion` on that subset.
-    """
-    stress = (meta["Metadata_Condition"] == "Stress").to_numpy()
-    stress_activity = compute_activity(
-        meta.loc[stress],
-        feats[stress],
-        null_size=null_size,
-        seed=seed,
-        cache_dir=cache_dir,
-        ap_cache_path=activity_cache_path,
-    )
-    active_compounds = set(
-        stress_activity.loc[
-            stress_activity["below_corrected_p"], "Metadata_broad_sample"
-        ]
-    )
-
-    baseline_activity = compute_baseline_activity(
-        meta,
-        feats,
-        null_size=null_size,
-        seed=seed,
-        cache_dir=cache_dir,
-        ap_cache_path=baseline_activity_cache_path,
-    )
-    safe_compounds = set(
-        baseline_activity.loc[
-            ~baseline_activity["below_corrected_p"], "Metadata_broad_sample"
-        ]
-    )
-
-    allowlist = active_compounds & safe_compounds
-
-    allowed_stress_trt = (
-        stress
-        & (meta["Metadata_pert_type"] == "trt").to_numpy()
-        & meta["Metadata_broad_sample"].isin(allowlist).to_numpy()
-    )
-    control_wells = (meta["Metadata_pert_type"] == "control").to_numpy()
-    mask = allowed_stress_trt | control_wells
-
-    return compute_reversion(
-        meta.loc[mask],
-        feats[mask],
-        null_size=null_size,
-        seed=seed,
-        cache_dir=cache_dir,
-        ap_cache_path=reversion_cache_path,
-    )
 
 
 # --- hit-set agreement + allowlist enrichment ---------------------------
