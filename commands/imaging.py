@@ -715,7 +715,7 @@ def copairs_reversion_main(
             ~baseline_activity["below_corrected_p"], "Metadata_broad_sample"
         ]
     )
-    allowlist = active_compounds & safe_compounds
+    allowlist = active_compounds #& safe_compounds
     print(
         f"[{feature_space}/{covariate_set}] {len(active_compounds)} active in "
         f"{stress_condition} ({activity_parquet}) & {len(safe_compounds)} safe "
